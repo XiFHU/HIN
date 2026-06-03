@@ -9,3 +9,5 @@ openpyxl
 pyogrio
 rtree
 osmnx
+networkx
+scikit-learn
