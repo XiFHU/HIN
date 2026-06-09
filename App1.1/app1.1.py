@@ -47,6 +47,38 @@ st.set_page_config(
 
 st.title("Local Corridor Crash Analysis Tool")
 
+
+def add_map_elements(fmap):
+
+    folium.plugins.MeasureControl(
+        position="bottomleft",
+        primary_length_unit="miles",
+        secondary_length_unit="feet"
+    ).add_to(fmap)
+
+    north_arrow_html = """
+    <div style="
+        position: fixed;
+        top: 80px;
+        right: 30px;
+        z-index: 9999;
+        background: white;
+        padding: 8px;
+        border: 2px solid black;
+        font-size: 22px;
+        font-weight: bold;
+        text-align: center;
+    ">
+        ↑<br>N
+    </div>
+    """
+
+    fmap.get_root().html.add_child(
+        folium.Element(north_arrow_html)
+    )
+
+    return fmap
+
 def make_json_safe_gdf(gdf):
     gdf = gdf.copy()
 
