@@ -1,3 +1,6 @@
+import io
+import zipfile
+import folium.plugins
 import tempfile
 import os
 import streamlit as st
@@ -173,6 +176,48 @@ def make_json_safe_gdf(gdf):
 
     return gdf
 
+def filter_points_to_units(points, units, buffer_m=20):
+    if points is None or points.empty:
+        return points
+
+    if units is None or units.empty:
+        return points.iloc[0:0].copy()
+
+    points_proj = points.to_crs(epsg=3857).copy()
+    units_proj = units.to_crs(epsg=3857).copy()
+
+    units_buffer = units_proj.copy()
+    units_buffer["geometry"] = units_buffer.geometry.buffer(buffer_m)
+
+    joined = gpd.sjoin(
+        points_proj,
+        units_buffer[["geometry"]],
+        how="inner",
+        predicate="intersects"
+    )
+
+    filtered = points_proj.loc[
+        points_proj.index.isin(joined.index)
+    ].copy()
+
+    return filtered.to_crs(points.crs)
+
+
+def geojson_zip_for_layers(layer_dict):
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for layer_name, gdf in layer_dict.items():
+            if gdf is not None and not gdf.empty:
+                safe_gdf = make_json_safe_gdf(gdf.to_crs(4326))
+                geojson_text = safe_gdf.to_json()
+                zf.writestr(
+                    f"{layer_name}.geojson",
+                    geojson_text
+                )
+
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
 
 def make_map(
     boundary=None,
@@ -2029,21 +2074,118 @@ if spatial_units is not None and assigned_crashes is not None:
 
         spatial_units_map_for_display = spatial_units_map.copy()
 
+    # Filter signals when only showing spatial units with crashes
+    if unit_display_option == "Show crashes with spatial units that have crashes only":
+        signals_for_display = filter_points_to_units(
+            signals_clean,
+            spatial_units_map_for_display,
+            buffer_m=20
+        )
+    else:
+        signals_for_display = signals_clean
+
+    st.markdown("### Map layers")
+
+    map_layer_options = [
+        "Boundary",
+        "Roads",
+        "Signals",
+        "Crash Density Spatial Units",
+        "Assigned Crashes"
+    ]
+
+    selected_map_layers = st.multiselect(
+        "Select layers to show on the crash assignment map",
+        map_layer_options,
+        default=[
+            "Boundary",
+            "Roads",
+            "Signals",
+            "Crash Density Spatial Units",
+            "Assigned Crashes"
+        ]
+    )
+
+    boundary_layer = selected_boundary if "Boundary" in selected_map_layers else None
+    roads_layer = selected_roads if "Roads" in selected_map_layers else None
+    signals_layer = signals_for_display if "Signals" in selected_map_layers else None
+    spatial_units_layer = (
+        spatial_units_map_for_display
+        if "Crash Density Spatial Units" in selected_map_layers
+        else None
+    )
+    crashes_layer = assigned_crashes if "Assigned Crashes" in selected_map_layers else None
+
     density_cmap = make_density_colormap(
         spatial_units_map_for_display
     )
 
     fmap = make_map(
-        boundary=selected_boundary,
-        roads=selected_roads,
-        signals=signals_clean,
+        boundary=boundary_layer,
+        roads=roads_layer,
+        signals=signals_layer,
         corridors=None,
-        spatial_units=spatial_units_map_for_display,
-        crashes=assigned_crashes,
+        spatial_units=spatial_units_layer,
+        crashes=crashes_layer,
         density_cmap=density_cmap
     )
 
-    density_cmap.add_to(fmap)
+    if spatial_units_layer is not None:
+        density_cmap.add_to(fmap)
+
+    fmap = add_map_elements(fmap)
+
+    st.markdown("### Download map / layers")
+
+    download_layer_options = st.multiselect(
+        "Select layers to download",
+        map_layer_options,
+        default=[
+            "Crash Density Spatial Units",
+            "Assigned Crashes"
+        ]
+    )
+
+    download_layers = {
+        "boundary": selected_boundary if "Boundary" in download_layer_options else None,
+        "roads": selected_roads if "Roads" in download_layer_options else None,
+        "signals": signals_for_display if "Signals" in download_layer_options else None,
+        "crash_density_spatial_units": (
+            spatial_units_map_for_display
+            if "Crash Density Spatial Units" in download_layer_options
+            else None
+        ),
+        "assigned_crashes": assigned_crashes if "Assigned Crashes" in download_layer_options else None,
+    }
+
+    selected_download_layers = {
+        k: v for k, v in download_layers.items()
+        if v is not None and not v.empty
+    }
+
+    if selected_download_layers:
+
+        layer_zip_bytes = geojson_zip_for_layers(
+            selected_download_layers
+        )
+
+        st.download_button(
+            "Download Selected Layers GeoJSON ZIP",
+            data=layer_zip_bytes,
+            file_name="selected_crash_assignment_layers.zip",
+            mime="application/zip",
+            key=f"download_selected_layers_{analysis_type}"
+        )
+
+    map_html = fmap.get_root().render()
+
+    st.download_button(
+        "Download Current Crash Assignment Map HTML",
+        data=map_html,
+        file_name="crash_assignment_map.html",
+        mime="text/html",
+        key=f"download_crash_assignment_map_{analysis_type}"
+    )
 
     st_folium(
         fmap,
@@ -2054,6 +2196,8 @@ if spatial_units is not None and assigned_crashes is not None:
             + str(analysis_type)
             + "_"
             + str(unit_display_option)
+            + "_"
+            + "_".join(selected_map_layers)
             + "_"
             + str(len(spatial_units_map_for_display))
             + "_"
