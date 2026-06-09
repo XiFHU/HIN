@@ -252,6 +252,7 @@ def geojson_zip_for_layers(layer_dict):
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for layer_name, gdf in layer_dict.items():
             if gdf is not None and not gdf.empty:
+
                 safe_gdf = make_json_safe_gdf(
                     gdf.to_crs(4326)
                 )
@@ -420,12 +421,10 @@ def make_map(
             ).add_to(fmap)
 
     spatial_units = clean_for_map(spatial_units)
-    spatial_units = make_json_safe_gdf(spatial_units)
 
     if spatial_units is not None and not spatial_units.empty:
 
         spatial_units_plot = spatial_units.to_crs(epsg=4326).copy()
-        spatial_units_plot = make_json_safe_gdf(spatial_units_plot)
 
         spatial_units_group = folium.FeatureGroup(
             name="Spatial Units - Crash Density",
@@ -439,9 +438,24 @@ def make_map(
                 0
             )
 
+            try:
+
+                density = float(
+                    density
+                )
+
+            except Exception:
+
+                density = 0.0
+
             if density_cmap is not None:
-                color = density_cmap(density)
+
+                color = density_cmap(
+                    density
+                )
+
             else:
+
                 color = "purple"
 
             return {
@@ -1848,13 +1862,25 @@ def add_density_to_spatial_units(spatial_units_map):
     return spatial_units_map
 
 
-def make_density_colormap(gdf, density_col="CrashDensity"):
+def make_density_colormap(
+    gdf,
+    density_col="CrashDensity"
+):
 
-    values = gdf[density_col].fillna(0)
+    values = (
+        pd.to_numeric(
+            gdf[density_col],
+            errors="coerce"
+        )
+        .fillna(0)
+    )
 
-    vmax = values.quantile(0.95)
+    vmax = values.quantile(
+        0.95
+    )
 
     if vmax <= 0:
+
         vmax = 1
 
     cmap = cm.LinearColormap(
@@ -1868,7 +1894,10 @@ def make_density_colormap(gdf, density_col="CrashDensity"):
         vmax=float(vmax)
     )
 
-    cmap.caption = "Crash Density: Green = Low, Red = High"
+    cmap.caption = (
+        "Crash Density: "
+        "Green = Low, Red = High"
+    )
 
     return cmap
 
