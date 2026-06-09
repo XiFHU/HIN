@@ -1508,12 +1508,13 @@ if crashes is not None:
 
     elif crash_analysis_type == "Road segment crashes":
 
-        segment_length_ft = st.number_input(
-            "Road segment length, feet",
-            min_value=50,
-            max_value=5280,
-            value=500,
-            step=50
+        segment_unit_method = st.radio(
+            "Road segment unit method",
+            [
+                "Create equal-length segments",
+                "Use uploaded road segments"
+            ],
+            horizontal=True
         )
 
         segment_search_distance_ft = st.number_input(
@@ -1530,42 +1531,85 @@ if crashes is not None:
                 "Select roads first."
             )
 
-        elif st.button("Classify Road Segment Crashes"):
+        elif segment_unit_method == "Create equal-length segments":
 
-            spatial_units = create_road_segment_units(
-                selected_roads,
-                segment_length_ft=segment_length_ft
+            segment_length_ft = st.number_input(
+                "Road segment length, feet",
+                min_value=50,
+                max_value=5280,
+                value=500,
+                step=50
             )
 
-            assigned_crashes = assign_crashes_to_units(
-                crashes,
-                spatial_units,
-                unit_id_col="UnitID",
-                method="nearest",
-                search_distance_ft=segment_search_distance_ft
-            )
+            if st.button("Classify Road Segment Crashes"):
 
-            kabco_result = summarize_kabco(
-                assigned_crashes,
-                unit_id_col="UnitID"
-            )
+                spatial_units = create_road_segment_units(
+                    selected_roads,
+                    segment_length_ft=segment_length_ft
+                )
 
-            st.session_state[
-                "spatial_units"
-            ] = spatial_units
+                assigned_crashes = assign_crashes_to_units(
+                    crashes,
+                    spatial_units,
+                    unit_id_col="UnitID",
+                    method="nearest",
+                    search_distance_ft=segment_search_distance_ft
+                )
 
-            st.session_state[
-                "assigned_crashes"
-            ] = assigned_crashes
+                kabco_result = summarize_kabco(
+                    assigned_crashes,
+                    unit_id_col="UnitID"
+                )
 
-            st.session_state[
-                "kabco_result"
-            ] = kabco_result
+                st.session_state["spatial_units"] = spatial_units
+                st.session_state["assigned_crashes"] = assigned_crashes
+                st.session_state["kabco_result"] = kabco_result
+                st.session_state["analysis_type"] = "Road Segment"
+                st.session_state["segment_unit_method"] = "Equal Length"
 
-            st.session_state[
-                "analysis_type"
-            ] = "Road Segment"
+        elif segment_unit_method == "Use uploaded road segments":
 
+            if st.button("Classify Uploaded Road Segment Crashes"):
+
+                spatial_units = selected_roads.copy()
+
+                segment_id_col = st.session_state.get(
+                    "segment_id_col",
+                    None
+                )
+
+                if segment_id_col is None or segment_id_col not in spatial_units.columns:
+                    st.error(
+                        "Segment ID column is missing. Please select a unique segment ID column in Section 1."
+                    )
+                    st.stop()
+
+                spatial_units["UnitID"] = spatial_units[
+                    segment_id_col
+                ].astype(str)
+
+                spatial_units["UnitType"] = "Road Segment"
+
+                spatial_units["SegmentID"] = spatial_units["UnitID"]
+
+                assigned_crashes = assign_crashes_to_units(
+                    crashes,
+                    spatial_units,
+                    unit_id_col="UnitID",
+                    method="nearest",
+                    search_distance_ft=segment_search_distance_ft
+                )
+
+                kabco_result = summarize_kabco(
+                    assigned_crashes,
+                    unit_id_col="UnitID"
+                )
+
+                st.session_state["spatial_units"] = spatial_units
+                st.session_state["assigned_crashes"] = assigned_crashes
+                st.session_state["kabco_result"] = kabco_result
+                st.session_state["analysis_type"] = "Uploaded Road Segment"
+                st.session_state["segment_unit_method"] = "Uploaded Road Segments"
 
 # -----------------------------
 # 6. Crash summary, map, and downloads
