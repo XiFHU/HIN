@@ -11,3 +11,4 @@ rtree
 osmnx
 networkx
 scikit-learn
+matplotlib
