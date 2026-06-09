@@ -12,3 +12,5 @@ osmnx
 networkx
 scikit-learn
 matplotlib
+contextily
+xyzservices
