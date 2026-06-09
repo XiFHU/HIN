@@ -4,7 +4,9 @@ import streamlit as st
 from streamlit_folium import st_folium
 import geopandas as gpd
 import folium
-
+from modules.crash_density import add_crash_density
+import branca.colormap as cm
+import numpy as np
 from modules.io_utils import load_vector, load_crash_file
 from modules.roads import (
     get_city_names,
@@ -178,7 +180,8 @@ def make_map(
     signals=None,
     corridors=None,
     spatial_units=None,
-    crashes=None
+    crashes=None,
+    density_cmap=None
 ):
     center_source = None
 
@@ -1572,18 +1575,164 @@ def prepare_for_shapefile(gdf):
             "FULLNAME",
             "FromMile",
             "ToMile",
+            "Length_Miles",
+            "Area_SqMi",
             "KABCO",
             "Severity",
             "Total",
             "CrashCount",
+            "CrashDensity",
             "geometry"
         ]
         if c is not None and c in gdf.columns
     ]
 
-    return gdf[
-        keep_cols
-    ].copy()
+    return gdf[keep_cols].copy()
+
+
+def add_density_to_spatial_units(spatial_units_map):
+
+    spatial_units_map = spatial_units_map.copy()
+
+    spatial_units_proj = spatial_units_map.to_crs(epsg=3857)
+
+    spatial_units_map["Length_Miles"] = (
+        spatial_units_proj.geometry.length / 1609.344
+    )
+
+    spatial_units_map["Area_SqMi"] = (
+        spatial_units_proj.geometry.area / 2589988.110336
+    )
+
+    spatial_units_map["CrashDensity"] = 0.0
+
+    if "UnitType" in spatial_units_map.columns:
+
+        line_mask = spatial_units_map["UnitType"].isin(
+            [
+                "Segment",
+                "Corridor",
+                "Sliding Window",
+                "Road Segment"
+            ]
+        )
+
+        area_mask = spatial_units_map["UnitType"].isin(
+            [
+                "Intersection",
+                "Intersection Buffer"
+            ]
+        )
+
+        spatial_units_map.loc[line_mask, "CrashDensity"] = np.where(
+            spatial_units_map.loc[line_mask, "Length_Miles"] > 0,
+            spatial_units_map.loc[line_mask, "CrashCount"] /
+            spatial_units_map.loc[line_mask, "Length_Miles"],
+            0
+        )
+
+        spatial_units_map.loc[area_mask, "CrashDensity"] = np.where(
+            spatial_units_map.loc[area_mask, "Area_SqMi"] > 0,
+            spatial_units_map.loc[area_mask, "CrashCount"] /
+            spatial_units_map.loc[area_mask, "Area_SqMi"],
+            0
+        )
+
+        other_mask = ~(line_mask | area_mask)
+
+        spatial_units_map.loc[other_mask, "CrashDensity"] = (
+            spatial_units_map.loc[other_mask, "CrashCount"]
+        )
+
+    else:
+
+        geom_types = spatial_units_map.geometry.geom_type
+
+        line_mask = geom_types.isin(
+            [
+                "LineString",
+                "MultiLineString"
+            ]
+        )
+
+        polygon_mask = geom_types.isin(
+            [
+                "Polygon",
+                "MultiPolygon"
+            ]
+        )
+
+        point_mask = geom_types.isin(
+            [
+                "Point",
+                "MultiPoint"
+            ]
+        )
+
+        spatial_units_map.loc[line_mask, "CrashDensity"] = np.where(
+            spatial_units_map.loc[line_mask, "Length_Miles"] > 0,
+            spatial_units_map.loc[line_mask, "CrashCount"] /
+            spatial_units_map.loc[line_mask, "Length_Miles"],
+            0
+        )
+
+        spatial_units_map.loc[polygon_mask, "CrashDensity"] = np.where(
+            spatial_units_map.loc[polygon_mask, "Area_SqMi"] > 0,
+            spatial_units_map.loc[polygon_mask, "CrashCount"] /
+            spatial_units_map.loc[polygon_mask, "Area_SqMi"],
+            0
+        )
+
+        spatial_units_map.loc[point_mask, "CrashDensity"] = (
+            spatial_units_map.loc[point_mask, "CrashCount"]
+        )
+
+    spatial_units_map["CrashDensity"] = (
+        spatial_units_map["CrashDensity"]
+        .replace([np.inf, -np.inf], 0)
+        .fillna(0)
+    )
+
+    return spatial_units_map
+
+
+def make_density_colormap(gdf, density_col="CrashDensity"):
+
+    values = gdf[density_col].fillna(0)
+
+    vmax = values.quantile(0.95)
+
+    if vmax <= 0:
+        vmax = 1
+
+    cmap = cm.LinearColormap(
+        colors=[
+            "green",
+            "yellow",
+            "orange",
+            "red"
+        ],
+        vmin=0,
+        vmax=float(vmax)
+    )
+
+    cmap.caption = "Crash Density: Green = Low, Red = High"
+
+    return cmap
+
+
+def get_density_color(value, cmap):
+
+    if value is None:
+        value = 0
+
+    try:
+        if np.isnan(value):
+            value = 0
+    except Exception:
+        value = 0
+
+    return cmap(float(value))
 
 
 st.header("6. Crash summary, map, and downloads")
@@ -1629,6 +1778,10 @@ if spatial_units is not None and assigned_crashes is not None:
         .astype(int)
     )
 
+    spatial_units_map = add_density_to_spatial_units(
+        spatial_units_map
+    )
+
     st.subheader(
         f"{analysis_type} Spatial Units"
     )
@@ -1650,7 +1803,10 @@ if spatial_units is not None and assigned_crashes is not None:
         "RoadName2",
         "FromMile",
         "ToMile",
+        "Length_Miles",
+        "Area_SqMi",
         "CrashCount",
+        "CrashDensity",
         "GeometryType"
     ]
 
@@ -1750,10 +1906,10 @@ if spatial_units is not None and assigned_crashes is not None:
 
     st.subheader("Download Geometry Files")
 
-    geojson_key = f"units_with_count_geojson_{analysis_type}"
+    geojson_key = f"units_with_density_geojson_{analysis_type}"
 
     if st.button(
-        "Prepare Spatial Units With Crash Count GeoJSON",
+        "Prepare Spatial Units With Crash Density GeoJSON",
         key=f"prepare_{geojson_key}"
     ):
 
@@ -1774,7 +1930,7 @@ if spatial_units is not None and assigned_crashes is not None:
             ] = geojson_bytes
 
             st.success(
-                "Spatial units with crash count GeoJSON ready."
+                "Spatial units with crash density GeoJSON ready."
             )
 
         except Exception as e:
@@ -1786,11 +1942,11 @@ if spatial_units is not None and assigned_crashes is not None:
     if geojson_key in st.session_state:
 
         st.download_button(
-            "Download Spatial Units With Crash Count GeoJSON",
+            "Download Spatial Units With Crash Density GeoJSON",
             st.session_state[
                 geojson_key
             ],
-            file_name="spatial_units_with_crash_count.geojson",
+            file_name="spatial_units_with_crash_density.geojson",
             mime="application/geo+json",
             key=f"download_{geojson_key}"
         )
@@ -1816,14 +1972,21 @@ if spatial_units is not None and assigned_crashes is not None:
 
         spatial_units_map_for_display = spatial_units_map.copy()
 
+    density_cmap = make_density_colormap(
+        spatial_units_map_for_display
+    )
+
     fmap = make_map(
         boundary=selected_boundary,
         roads=selected_roads,
         signals=signals_clean,
         corridors=corridors,
         spatial_units=spatial_units_map_for_display,
-        crashes=assigned_crashes
+        crashes=assigned_crashes,
+        density_cmap=density_cmap
     )
+
+    density_cmap.add_to(fmap)
 
     st_folium(
         fmap,
