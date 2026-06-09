@@ -83,31 +83,36 @@ def make_json_safe_gdf(gdf):
     if gdf is None:
         return None
 
+    import datetime
+
     gdf = gdf.copy()
 
     for col in gdf.columns:
         if col == "geometry":
             continue
 
-        if str(gdf[col].dtype).startswith("datetime"):
-            gdf[col] = gdf[col].astype(str)
-
-        elif str(gdf[col].dtype) == "object":
-            gdf[col] = gdf[col].apply(
-                lambda x: (
-                    None
-                    if x is None
-                    else str(x)
-                    if isinstance(x, (list, dict, tuple, set))
-                    else x
+        gdf[col] = gdf[col].apply(
+            lambda x: (
+                None
+                if x is None or str(x) in ["nan", "NaT"]
+                else str(x)
+                if isinstance(
+                    x,
+                    (
+                        datetime.date,
+                        datetime.datetime,
+                        datetime.time,
+                        list,
+                        dict,
+                        tuple,
+                        set
+                    )
                 )
+                else x.item()
+                if hasattr(x, "item")
+                else x
             )
-
-        elif "int" in str(gdf[col].dtype):
-            gdf[col] = gdf[col].astype("Int64").astype(object)
-
-        elif "float" in str(gdf[col].dtype):
-            gdf[col] = gdf[col].astype(float)
+        )
 
     gdf = gdf.replace(
         [np.inf, -np.inf],
@@ -115,7 +120,6 @@ def make_json_safe_gdf(gdf):
     )
 
     return gdf
-
 def load_uploaded_shapefile_components(uploaded_files):
     with tempfile.TemporaryDirectory() as tmpdir:
 
