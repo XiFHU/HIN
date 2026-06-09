@@ -368,15 +368,54 @@ def make_map(
                 ).add_to(fmap)
 
         else:
+
+            spatial_units_plot = spatial_units.to_crs(epsg=4326).copy()
+
+            def style_spatial_unit(feature):
+
+                density = feature["properties"].get(
+                    "CrashDensity",
+                    0
+                )
+
+                if density_cmap is not None:
+                    color = density_cmap(density)
+                else:
+                    color = "purple"
+
+                return {
+                    "color": color,
+                    "fillColor": color,
+                    "weight": 4,
+                    "opacity": 0.9,
+                    "fillOpacity": 0.55,
+                }
+
+            tooltip_fields = [
+                c for c in [
+                    "UnitType",
+                    "UnitID",
+                    "IntersectionID",
+                    "SegmentID",
+                    "CorridorID",
+                    "Route",
+                    "FULLNAME",
+                    "CrashCount",
+                    "CrashDensity",
+                    "Length_Miles",
+                    "Area_SqMi",
+                ]
+                if c in spatial_units_plot.columns
+            ]
+
             folium.GeoJson(
-                spatial_units,
-                name="Spatial Units",
-                style_function=lambda feature: {
-                    "color": "purple",
-                    "fillColor": "purple",
-                    "weight": 3,
-                    "fillOpacity": 0.25,
-                },
+                spatial_units_plot,
+                name="Spatial Units - Crash Density",
+                style_function=style_spatial_unit,
+                tooltip=folium.GeoJsonTooltip(
+                    fields=tooltip_fields,
+                    localize=True
+                )
             ).add_to(fmap)
 
     signals = clean_for_map(signals)
@@ -833,7 +872,7 @@ if selected_roads is not None:
         if road_table_cols:
             st.dataframe(
                 selected_roads[road_table_cols].drop_duplicates(),
-                use_container_width=True
+                width="stretch"
             )
         else:
             st.info("No displayable road attribute columns found.")
@@ -963,7 +1002,7 @@ if signals_clean is not None:
 
     st.dataframe(
         signals_table,
-        use_container_width=True
+        width="stretch"
     )
 
     st.download_button(
@@ -1151,7 +1190,7 @@ if signals_with_corridor is not None:
 
     st.dataframe(
         signal_corridor_table,
-        use_container_width=True
+        width="stretch"
     )
 
     st.download_button(
@@ -1168,7 +1207,7 @@ if corridor_summary is not None:
 
     st.dataframe(
         corridor_summary,
-        use_container_width=True
+        width="stretch"
     )
 
     st.download_button(
@@ -1822,7 +1861,7 @@ if spatial_units is not None and assigned_crashes is not None:
 
     st.dataframe(
         units_table,
-        use_container_width=True
+        width="stretch"
     )
 
     st.subheader("Assigned Crashes")
@@ -1868,7 +1907,7 @@ if spatial_units is not None and assigned_crashes is not None:
 
     st.dataframe(
         assigned_table,
-        use_container_width=True
+        width="stretch"
     )
 
     if kabco_result is not None:
@@ -1877,7 +1916,7 @@ if spatial_units is not None and assigned_crashes is not None:
 
         st.dataframe(
             kabco_result,
-            use_container_width=True
+            width="stretch"
         )
 
         st.download_button(
