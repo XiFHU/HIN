@@ -1,3 +1,4 @@
+import contextily as ctx
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.lines import Line2D
@@ -121,22 +122,36 @@ def create_static_map_pdf(
             ax=ax,
             column="CrashDensity",
             cmap="RdYlGn_r",
-            linewidth=1.2,
-            edgecolor="black",
-            alpha=0.65,
+            linewidth=8,
+            alpha=1.0,
             legend=True,
             legend_kwds={
                 "label": "Crash Density",
                 "shrink": 0.6
             }
         )
+        try:
 
+            import contextily as ctx
+
+            ctx.add_basemap(
+                ax,
+                source=ctx.providers.OpenStreetMap.Mapnik,
+                crs="EPSG:3857",
+                zoom=13
+            )
+
+        except Exception as e:
+
+            print(
+                f"Could not add OSM basemap: {e}"
+            )
     if crashes is not None and not crashes.empty:
         crashes.to_crs(epsg=3857).plot(
             ax=ax,
-            markersize=8,
+            markersize=20,
             color="black",
-            alpha=0.7
+            alpha=0.8
         )
 
         legend_items.append(
@@ -154,7 +169,7 @@ def create_static_map_pdf(
     if signals is not None and not signals.empty:
         signals.to_crs(epsg=3857).plot(
             ax=ax,
-            markersize=30,
+            markersize=80,
             color="red",
             marker="^"
         )
