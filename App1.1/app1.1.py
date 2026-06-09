@@ -80,6 +80,9 @@ def add_map_elements(fmap):
     return fmap
 
 def make_json_safe_gdf(gdf):
+    if gdf is None:
+        return None
+
     gdf = gdf.copy()
 
     for col in gdf.columns:
@@ -89,6 +92,28 @@ def make_json_safe_gdf(gdf):
         if str(gdf[col].dtype).startswith("datetime"):
             gdf[col] = gdf[col].astype(str)
 
+        elif str(gdf[col].dtype) == "object":
+            gdf[col] = gdf[col].apply(
+                lambda x: (
+                    None
+                    if x is None
+                    else str(x)
+                    if isinstance(x, (list, dict, tuple, set))
+                    else x
+                )
+            )
+
+        elif "int" in str(gdf[col].dtype):
+            gdf[col] = gdf[col].astype("Int64").astype(object)
+
+        elif "float" in str(gdf[col].dtype):
+            gdf[col] = gdf[col].astype(float)
+
+    gdf = gdf.replace(
+        [np.inf, -np.inf],
+        None
+    )
+
     return gdf
 
 def load_uploaded_shapefile_components(uploaded_files):
@@ -97,6 +122,7 @@ def load_uploaded_shapefile_components(uploaded_files):
         shp_path = None
 
         for uploaded_file in uploaded_files:
+
             file_path = os.path.join(
                 tmpdir,
                 uploaded_file.name
@@ -105,15 +131,37 @@ def load_uploaded_shapefile_components(uploaded_files):
             with open(file_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
-            if uploaded_file.name.lower().endswith(".shp"):
+            if uploaded_file.name.lower().endswith(".zip"):
+
+                import zipfile
+
+                with zipfile.ZipFile(file_path, "r") as z:
+                    z.extractall(tmpdir)
+
+            elif uploaded_file.name.lower().endswith(".shp"):
+
                 shp_path = file_path
 
         if shp_path is None:
-            raise ValueError("No .shp file found.")
+
+            for root, dirs, files in os.walk(tmpdir):
+                for file in files:
+                    if file.lower().endswith(".shp"):
+                        shp_path = os.path.join(root, file)
+                        break
+
+                if shp_path is not None:
+                    break
+
+        if shp_path is None:
+            raise ValueError(
+                "No .shp file found. Upload a ZIP containing .shp, .dbf, .shx, .prj, or upload components together."
+            )
 
         gdf = gpd.read_file(shp_path)
 
     return gdf
+
 def road_class_color(road_class):
 
     colors = {
@@ -241,8 +289,14 @@ def geojson_zip_for_layers(layer_dict):
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for layer_name, gdf in layer_dict.items():
             if gdf is not None and not gdf.empty:
-                safe_gdf = make_json_safe_gdf(gdf.to_crs(4326))
-                geojson_text = safe_gdf.to_json()
+                safe_gdf = make_json_safe_gdf(
+                    gdf.to_crs(4326)
+                )
+
+                geojson_text = safe_gdf.to_json(
+                    na="drop"
+                )
+
                 zf.writestr(
                     f"{layer_name}.geojson",
                     geojson_text
@@ -712,8 +766,9 @@ else:
     )
 
     custom_road_files = st.file_uploader(
-        "Upload road shapefile components",
+        "Upload road shapefile ZIP or components",
         type=[
+            "zip",
             "shp",
             "dbf",
             "shx",
