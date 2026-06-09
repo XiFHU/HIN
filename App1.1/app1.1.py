@@ -1,3 +1,7 @@
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 import pandas as pd
 import io
 import zipfile
@@ -48,6 +52,202 @@ st.set_page_config(
 
 st.title("Local Corridor Crash Analysis Tool")
 
+def create_static_map_pdf(
+    boundary=None,
+    roads=None,
+    signals=None,
+    spatial_units=None,
+    crashes=None,
+    title="Crash Assignment Map"
+):
+
+    pdf_buffer = io.BytesIO()
+
+    fig, ax = plt.subplots(
+        figsize=(
+            11,
+            8.5
+        )
+    )
+
+    legend_items = []
+
+    if boundary is not None and not boundary.empty:
+        boundary.to_crs(epsg=3857).boundary.plot(
+            ax=ax,
+            linewidth=1,
+            color="black"
+        )
+
+        legend_items.append(
+            Line2D(
+                [0],
+                [0],
+                color="black",
+                linewidth=1,
+                label="Boundary"
+            )
+        )
+
+    if roads is not None and not roads.empty:
+        roads.to_crs(epsg=3857).plot(
+            ax=ax,
+            linewidth=0.5,
+            color="gray"
+        )
+
+        legend_items.append(
+            Line2D(
+                [0],
+                [0],
+                color="gray",
+                linewidth=1,
+                label="Roads"
+            )
+        )
+
+    if spatial_units is not None and not spatial_units.empty:
+
+        spatial_units_plot = spatial_units.to_crs(
+            epsg=3857
+        ).copy()
+
+        spatial_units_plot["CrashDensity"] = pd.to_numeric(
+            spatial_units_plot["CrashDensity"],
+            errors="coerce"
+        ).fillna(0)
+
+        spatial_units_plot.plot(
+            ax=ax,
+            column="CrashDensity",
+            cmap="RdYlGn_r",
+            linewidth=1.2,
+            edgecolor="black",
+            alpha=0.65,
+            legend=True,
+            legend_kwds={
+                "label": "Crash Density",
+                "shrink": 0.6
+            }
+        )
+
+    if crashes is not None and not crashes.empty:
+        crashes.to_crs(epsg=3857).plot(
+            ax=ax,
+            markersize=8,
+            color="black",
+            alpha=0.7
+        )
+
+        legend_items.append(
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="black",
+                linestyle="None",
+                markersize=5,
+                label="Assigned Crashes"
+            )
+        )
+
+    if signals is not None and not signals.empty:
+        signals.to_crs(epsg=3857).plot(
+            ax=ax,
+            markersize=30,
+            color="red",
+            marker="^"
+        )
+
+        legend_items.append(
+            Line2D(
+                [0],
+                [0],
+                marker="^",
+                color="red",
+                linestyle="None",
+                markersize=7,
+                label="Signals"
+            )
+        )
+
+    ax.set_title(
+        title,
+        fontsize=16
+    )
+
+    ax.set_axis_off()
+
+    if legend_items:
+        ax.legend(
+            handles=legend_items,
+            loc="lower left"
+        )
+
+    # North arrow
+    ax.annotate(
+        "N",
+        xy=(
+            0.95,
+            0.88
+        ),
+        xytext=(
+            0.95,
+            0.78
+        ),
+        arrowprops=dict(
+            facecolor="black",
+            width=4,
+            headwidth=12
+        ),
+        ha="center",
+        va="center",
+        fontsize=14,
+        xycoords=ax.transAxes
+    )
+
+    # Scale bar: 1 mile
+    x_min, x_max = ax.get_xlim()
+    y_min, y_max = ax.get_ylim()
+
+    scale_m = 1609.344
+    scale_x = x_min + 0.08 * (x_max - x_min)
+    scale_y = y_min + 0.08 * (y_max - y_min)
+
+    ax.plot(
+        [
+            scale_x,
+            scale_x + scale_m
+        ],
+        [
+            scale_y,
+            scale_y
+        ],
+        color="black",
+        linewidth=3
+    )
+
+    ax.text(
+        scale_x + scale_m / 2,
+        scale_y + 0.02 * (y_max - y_min),
+        "1 mile",
+        ha="center",
+        fontsize=10
+    )
+
+    plt.tight_layout()
+
+    fig.savefig(
+        pdf_buffer,
+        format="pdf",
+        bbox_inches="tight"
+    )
+
+    plt.close(fig)
+
+    pdf_buffer.seek(0)
+
+    return pdf_buffer.getvalue()
 
 def add_map_elements(fmap):
 
@@ -93,6 +293,36 @@ def make_json_safe_gdf(gdf):
         gdf[col] = gdf[col].apply(
             lambda x: None if x is None or str(x) in ["nan", "NaT"] else str(x)
         )
+
+    return gdf
+
+def make_map_safe_gdf(
+    gdf,
+    numeric_cols=None
+):
+    if gdf is None:
+        return None
+
+    if numeric_cols is None:
+        numeric_cols = []
+
+    gdf = gdf.copy()
+
+    for col in gdf.columns:
+        if col == "geometry":
+            continue
+
+        if col in numeric_cols:
+            gdf[col] = pd.to_numeric(
+                gdf[col],
+                errors="coerce"
+            ).fillna(0)
+        else:
+            gdf[col] = gdf[col].apply(
+                lambda x: None
+                if x is None or str(x) in ["nan", "NaT"]
+                else str(x)
+            )
 
     return gdf
 
@@ -425,7 +655,19 @@ def make_map(
 
     if spatial_units is not None and not spatial_units.empty:
 
-        spatial_units_plot = spatial_units.to_crs(epsg=4326).copy()
+        spatial_units_plot = spatial_units.to_crs(
+            epsg=4326
+        ).copy()
+
+        spatial_units_plot = make_map_safe_gdf(
+            spatial_units_plot,
+            numeric_cols=[
+                "CrashDensity",
+                "CrashCount",
+                "Length_Miles",
+                "Area_SqMi"
+            ]
+        )
 
         spatial_units_group = folium.FeatureGroup(
             name="Spatial Units - Crash Density",
@@ -2243,6 +2485,23 @@ if spatial_units is not None and assigned_crashes is not None:
         if v is not None and not v.empty
     }
 
+    pdf_bytes = create_static_map_pdf(
+        boundary=boundary_layer,
+        roads=roads_layer,
+        signals=signals_layer,
+        spatial_units=spatial_units_layer,
+        crashes=crashes_layer,
+        title=f"{analysis_type} Crash Assignment Map"
+    )
+
+    st.download_button(
+        "Download Current Map PDF",
+        data=pdf_bytes,
+        file_name="crash_assignment_map.pdf",
+        mime="application/pdf",
+        key=f"download_current_map_pdf_{analysis_type}"
+    )
+
     if selected_download_layers:
 
         layer_zip_bytes = geojson_zip_for_layers(
@@ -2257,15 +2516,6 @@ if spatial_units is not None and assigned_crashes is not None:
             key=f"download_selected_layers_{analysis_type}"
         )
 
-    map_html = fmap.get_root().render()
-
-    st.download_button(
-        "Download Current Crash Assignment Map HTML",
-        data=map_html,
-        file_name="crash_assignment_map.html",
-        mime="text/html",
-        key=f"download_crash_assignment_map_{analysis_type}"
-    )
 
     st_folium(
         fmap,
