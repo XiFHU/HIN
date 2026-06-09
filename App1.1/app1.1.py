@@ -328,96 +328,68 @@ def make_map(
     spatial_units = clean_for_map(spatial_units)
     spatial_units = make_json_safe_gdf(spatial_units)
 
-    if spatial_units is not None:
-        if "UnitID" in spatial_units.columns:
-            for unit_id, sub in spatial_units.groupby("UnitID"):
-                color = id_color(unit_id)
+    if spatial_units is not None and not spatial_units.empty:
 
-                sub = make_json_safe_gdf(sub)
+        spatial_units_plot = spatial_units.to_crs(epsg=4326).copy()
+        spatial_units_plot = make_json_safe_gdf(spatial_units_plot)
 
-                tooltip_fields = [
-                    c for c in [
-                        "UnitID",
-                        "UnitType",
-                        "CrashCount",
-                        "IntersectionID",
-                        "SegmentID",
-                        "CorridorID",
-                        "Route",
-                        "FULLNAME",
-                        "RouteName_Calc",
-                        "RoadName1",
-                        "RoadName2"
-                    ]
-                    if c in sub.columns
-                ]
+        spatial_units_group = folium.FeatureGroup(
+            name="Spatial Units - Crash Density",
+            show=True
+        )
 
-                folium.GeoJson(
-                    sub,
-                    name=str(unit_id),
-                    style_function=lambda feature, color=color: {
-                        "color": color,
-                        "fillColor": color,
-                        "weight": 3,
-                        "fillOpacity": 0.30,
-                        "opacity": 0.9,
-                    },
-                    tooltip=folium.GeoJsonTooltip(
-                        fields=tooltip_fields
-                    ) if tooltip_fields else None,
-                ).add_to(fmap)
+        def style_spatial_unit(feature):
 
-        else:
+            density = feature["properties"].get(
+                "CrashDensity",
+                0
+            )
 
-            spatial_units_plot = spatial_units.to_crs(epsg=4326).copy()
+            if density_cmap is not None:
+                color = density_cmap(density)
+            else:
+                color = "purple"
 
-            def style_spatial_unit(feature):
+            return {
+                "color": color,
+                "fillColor": color,
+                "weight": 4,
+                "fillOpacity": 0.55,
+                "opacity": 0.9,
+            }
 
-                density = feature["properties"].get(
-                    "CrashDensity",
-                    0
-                )
-
-                if density_cmap is not None:
-                    color = density_cmap(density)
-                else:
-                    color = "purple"
-
-                return {
-                    "color": color,
-                    "fillColor": color,
-                    "weight": 4,
-                    "opacity": 0.9,
-                    "fillOpacity": 0.55,
-                }
-
-            tooltip_fields = [
-                c for c in [
-                    "UnitType",
-                    "UnitID",
-                    "IntersectionID",
-                    "SegmentID",
-                    "CorridorID",
-                    "Route",
-                    "FULLNAME",
-                    "CrashCount",
-                    "CrashDensity",
-                    "Length_Miles",
-                    "Area_SqMi",
-                ]
-                if c in spatial_units_plot.columns
+        tooltip_fields = [
+            c for c in [
+                "UnitID",
+                "UnitType",
+                "CrashCount",
+                "CrashDensity",
+                "Length_Miles",
+                "Area_SqMi",
+                "IntersectionID",
+                "SegmentID",
+                "CorridorID",
+                "Route",
+                "FULLNAME",
+                "RouteName_Calc",
+                "RoadName1",
+                "RoadName2"
             ]
+            if c in spatial_units_plot.columns
+        ]
 
-            folium.GeoJson(
-                spatial_units_plot,
-                name="Spatial Units - Crash Density",
-                style_function=style_spatial_unit,
-                tooltip=folium.GeoJsonTooltip(
-                    fields=tooltip_fields,
-                    localize=True
-                )
-            ).add_to(fmap)
+        folium.GeoJson(
+            spatial_units_plot,
+            name="Spatial Units - Crash Density",
+            style_function=style_spatial_unit,
+            tooltip=folium.GeoJsonTooltip(
+                fields=tooltip_fields,
+                localize=True
+            ) if tooltip_fields else None,
+        ).add_to(spatial_units_group)
 
+        spatial_units_group.add_to(fmap)
+        
     signals = clean_for_map(signals)
     signals = make_json_safe_gdf(signals)
 
@@ -500,7 +472,9 @@ def make_map(
 
         crash_group.add_to(fmap)
 
-    folium.LayerControl().add_to(fmap)
+    folium.LayerControl(
+        collapsed=False
+    ).add_to(fmap)
 
     return fmap
 
@@ -2019,7 +1993,7 @@ if spatial_units is not None and assigned_crashes is not None:
         boundary=selected_boundary,
         roads=selected_roads,
         signals=signals_clean,
-        corridors=corridors,
+        corridors=None,
         spatial_units=spatial_units_map_for_display,
         crashes=assigned_crashes,
         density_cmap=density_cmap
