@@ -168,23 +168,44 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
         with col1:
             roads_file = st.file_uploader(
                 "Upload county TIGER roads ZIP",
-                type=["zip", "gpkg", "geojson", "json"],
+                type=[
+                    "zip",
+                    "gpkg",
+                    "geojson",
+                    "json"
+                ],
                 key="tiger_roads_file"
             )
 
         with col2:
             places_file = st.file_uploader(
                 "Upload state PLACE ZIP",
-                type=["zip", "gpkg", "geojson", "json"],
+                type=[
+                    "zip",
+                    "gpkg",
+                    "geojson",
+                    "json"
+                ],
                 key="places_file"
             )
 
         if roads_file and places_file:
 
-            roads = load_vector(roads_file).to_crs(4326)
-            places = load_vector(places_file).to_crs(4326)
+            roads = load_vector(
+                roads_file
+            ).to_crs(
+                4326
+            )
 
-            st.success("TIGER files loaded.")
+            places = load_vector(
+                places_file
+            ).to_crs(
+                4326
+            )
+
+            st.success(
+                "TIGER files loaded."
+            )
 
             use_all_roads = st.checkbox(
                 "Use all roads without city clipping"
@@ -203,7 +224,10 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                 )
 
                 area_name = city_name
-                st.session_state["area_name"] = area_name
+
+                st.session_state[
+                    "area_name"
+                ] = area_name
 
                 selected_boundary = places[
                     places["NAME"] == city_name
@@ -219,7 +243,10 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
 
                 city_name = "All Roads"
                 area_name = city_name
-                st.session_state["area_name"] = area_name
+
+                st.session_state[
+                    "area_name"
+                ] = area_name
 
                 city_roads = roads.copy()
 
@@ -230,34 +257,51 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                     crs=roads.crs
                 )
 
-            road_classes = get_road_classes(city_roads)
+            selected_roads = city_roads.copy()
 
-            with st.expander("Optional: TIGER road class filter", expanded=False):
-                st.caption(
-                    "Optional. Filter TIGER roads by RTTYP for analysis and display. "
-                    "Leave all selected to use the full selected network."
-                )
-
-                selected_classes = st.multiselect(
-                    "Road classes to keep",
-                    road_classes,
-                    default=road_classes
-                )
-
-            selected_roads = filter_road_classes(
-                city_roads,
-                selected_classes
+            route_col = (
+                "FULLNAME"
+                if "FULLNAME" in selected_roads.columns
+                else selected_roads.columns[0]
             )
 
-            selected_roads = selected_roads.copy()
+            segment_id_col = (
+                "LINEARID"
+                if "LINEARID" in selected_roads.columns
+                else selected_roads.columns[0]
+            )
 
-            st.session_state["active_map_layer"] = "Roads"
+            selected_roads = generate_from_to_mile(
+                roads=selected_roads,
+                route_col=route_col,
+                segment_id_col=segment_id_col,
+                direction_method="Auto Detect",
+                start_mile=0.0
+            )
 
-            route_col = "FULLNAME"
-            segment_id_col = "LINEARID" if "LINEARID" in selected_roads.columns else selected_roads.columns[0]
+            selected_roads = selected_roads.to_crs(
+                4326
+            )
 
-            st.session_state["route_col"] = route_col
-            st.session_state["segment_id_col"] = segment_id_col
+            st.session_state[
+                "selected_roads"
+            ] = selected_roads
+
+            st.session_state[
+                "selected_boundary"
+            ] = selected_boundary
+
+            st.session_state[
+                "route_col"
+            ] = route_col
+
+            st.session_state[
+                "segment_id_col"
+            ] = segment_id_col
+
+            st.session_state[
+                "active_map_layer"
+            ] = "Roads"
 
     # =====================================================
     # Option B: Custom uploaded road network

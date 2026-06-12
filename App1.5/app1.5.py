@@ -634,11 +634,49 @@ spatial_unit = st.radio(
 
 # When switching workflow tabs, keep uploaded base data but clear the displayed
 # map HTML so results from the previous workflow do not remain visible.
-_previous_spatial_unit = st.session_state.get("_active_spatial_unit")
+_previous_spatial_unit = st.session_state.get(
+    "_active_spatial_unit"
+)
+
 if _previous_spatial_unit != spatial_unit:
-    st.session_state["_active_spatial_unit"] = spatial_unit
-    st.session_state.pop("last_main_map_html", None)
-    st.session_state["last_map_ready"] = False
+
+    st.session_state[
+        "_active_spatial_unit"
+    ] = spatial_unit
+
+    st.session_state.pop(
+        "last_main_map_html",
+        None
+    )
+
+    st.session_state[
+        "last_map_ready"
+    ] = False
+
+    # Keep shared uploaded inputs, but clear workflow-specific result display.
+    # This lets users jump between Intersection, Corridor, and Segment without
+    # old result layers/tables blocking the next workflow.
+    for k in [
+        "spatial_units",
+        "spatial_units_density_map",
+        "assigned_crashes",
+        "kabco_result",
+        "analysis_type",
+        "intersection_source",
+        "segment_unit_method",
+        "section7_results",
+        "section7_original_density",
+        "section7_crashes_for_map",
+        "section7_route_col_s7"
+    ]:
+        st.session_state.pop(
+            k,
+            None
+        )
+
+    st.session_state[
+        "active_map_layer"
+    ] = "Roads"
 
 # Reserve the main map area immediately below the top navigation.
 # The sidebar workflow can scroll independently, but this placeholder stays
