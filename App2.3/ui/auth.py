@@ -35,7 +35,8 @@ def ensure_auth_files():
             columns=[
                 "email",
                 "password_hash",
-                "approved"
+                "approved",
+                "is_admin"
             ]
         ).to_csv(USERS_FILE, index=False)
 
@@ -52,7 +53,33 @@ def ensure_auth_files():
 
 def load_users():
     ensure_auth_files()
-    return pd.read_csv(USERS_FILE)
+
+    users = pd.read_csv(USERS_FILE)
+
+    admin_email = st.secrets.get("ADMIN_EMAIL", "")
+    admin_password = st.secrets.get("ADMIN_PASSWORD", "")
+
+    if admin_email and admin_password:
+        admin_row = pd.DataFrame(
+            [{
+                "email": admin_email,
+                "password_hash": hash_password(admin_password),
+                "approved": True,
+                "is_admin": True
+            }]
+        )
+
+        users = users[
+            users["email"].astype(str).str.lower()
+            != admin_email.lower()
+        ]
+
+        users = pd.concat(
+            [users, admin_row],
+            ignore_index=True
+        )
+
+    return users
 
 
 def save_users(users):
@@ -159,10 +186,9 @@ def show_login_page():
                 st.session_state["logged_in"] = True
                 st.session_state["user_email"] = email
 
-                if email == st.secrets.get("ADMIN_EMAIL", ""):
-                    st.session_state["is_admin"] = True
-                else:
-                    st.session_state["is_admin"] = False
+                st.session_state["is_admin"] = bool(
+                    matched.iloc[0].get("is_admin", False)
+                )
 
                 st.rerun()
             else:
@@ -215,13 +241,17 @@ def show_admin_page():
                 new_user = pd.DataFrame(
                     [{
                         "email": row["email"],
-                        "password_hash": hash_password(new_password),
-                        "approved": True
+                        "password_hash": hash_password(
+                            new_password
+                        ),
+                        "approved": True,
+                        "is_admin": False
                     }]
                 )
 
                 users = users[
-                    users["email"].astype(str) != str(row["email"])
+                    users["email"].astype(str)
+                    != str(row["email"])
                 ]
 
                 users = pd.concat(
