@@ -14,11 +14,23 @@ import os
 import streamlit as st
 from ui.auth import require_login, show_admin_page
 
-if "admin" in st.query_params:
-    show_admin_page()
-    st.stop()
-
 require_login()
+
+if st.session_state.get("is_admin", False):
+    with st.sidebar:
+        st.divider()
+        page_mode = st.radio(
+            "Admin",
+            [
+                "HIN App",
+                "Admin Approval"
+            ],
+            key="admin_page_mode"
+        )
+
+    if page_mode == "Admin Approval":
+        show_admin_page()
+        st.stop()
 from streamlit_folium import st_folium
 _real_st_folium = st_folium
 import geopandas as gpd
