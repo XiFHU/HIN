@@ -157,6 +157,12 @@ def show_login_page():
             if not matched.empty:
                 st.session_state["logged_in"] = True
                 st.session_state["user_email"] = email
+
+                if email == st.secrets.get("ADMIN_EMAIL", ""):
+                    st.session_state["is_admin"] = True
+                else:
+                    st.session_state["is_admin"] = False
+
                 st.rerun()
             else:
                 st.error("Invalid login or account not approved.")
