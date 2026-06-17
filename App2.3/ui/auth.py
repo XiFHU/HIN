@@ -85,7 +85,10 @@ def show_request_access_page():
         key="request_reason"
     )
 
-    if st.button("Submit Request"):
+    if st.button(
+        "Submit Request",
+        key="submit_request_button"
+    ):
         if not name or not email:
             st.error("Please enter your name and email.")
             return
@@ -137,7 +140,10 @@ def show_login_page():
             key="login_password"
         )
 
-        if st.button("Login"):
+        if st.button(
+            "Login",
+            key="login_button"
+        ):
             users = load_users()
 
             password_hash = hash_password(password)
