@@ -9,7 +9,8 @@ from pathlib import Path
 
 USERS_FILE = Path("auth/users.csv")
 REQUESTS_FILE = Path("auth/access_requests.csv")
-
+st.write("Users file exists:", USERS_FILE.exists())
+st.write("Requests file exists:", REQUESTS_FILE.exists())
 
 def is_localhost():
     try:
