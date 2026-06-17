@@ -177,7 +177,8 @@ def show_login_page():
             password_hash = hash_password(password)
 
             matched = users[
-                (users["email"].astype(str) == email)
+                (users["email"].astype(str).str.lower() == email.lower()
+                )
                 & (users["password_hash"].astype(str) == password_hash)
                 & (users["approved"] == True)
             ]
@@ -201,12 +202,8 @@ def show_login_page():
 def show_admin_page():
     st.title("Admin Approval")
 
-    admin_password = st.text_input(
-        "Admin password",
-        type="password"
-    )
-
-    if admin_password != st.secrets.get("ADMIN_PASSWORD", ""):
+    if not st.session_state.get("is_admin", False):
+        st.error("Admin access only.")
         st.stop()
 
     requests = load_requests()
