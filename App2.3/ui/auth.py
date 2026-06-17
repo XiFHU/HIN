@@ -70,9 +70,20 @@ def save_requests(requests):
 def show_request_access_page():
     st.subheader("Request Access")
 
-    name = st.text_input("Name")
-    email = st.text_input("Email")
-    reason = st.text_area("Reason for access")
+    name = st.text_input(
+        "Name",
+        key="request_name"
+    )
+
+    email = st.text_input(
+        "Email",
+        key="request_email"
+    )
+
+    reason = st.text_area(
+        "Reason for access",
+        key="request_reason"
+    )
 
     if st.button("Submit Request"):
         if not name or not email:
@@ -115,10 +126,15 @@ def show_login_page():
     )
 
     with tab_login:
-        email = st.text_input("Email")
+        email = st.text_input(
+            "Email",
+            key="login_email"
+        )
+
         password = st.text_input(
             "Password",
-            type="password"
+            type="password",
+            key="login_password"
         )
 
         if st.button("Login"):
