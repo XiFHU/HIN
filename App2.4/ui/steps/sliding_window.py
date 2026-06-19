@@ -121,6 +121,69 @@ def _add_road_class_legend_to_map(fmap, color_lookup):
 
     return fmap
 
+
+def _ensure_hin_priority_columns(gdf):
+    """Add backward-compatible HIN Priority Index fields to old/cached results.
+
+    Older session_state results may still have Risk_Score or Max_Window_Score
+    but not HIN_Priority_Index. This helper prevents KeyError after app updates
+    or when all rows are filtered out.
+    """
+    if gdf is None:
+        return gdf
+
+    out = gdf.copy()
+
+    if "Max_Window_Score" not in out.columns:
+        if "Window_Score" in out.columns:
+            out["Max_Window_Score"] = out["Window_Score"]
+        elif "Risk_Score" in out.columns:
+            out["Max_Window_Score"] = out["Risk_Score"]
+        elif "EPDO" in out.columns:
+            out["Max_Window_Score"] = out["EPDO"]
+        elif "Crash_Count" in out.columns:
+            out["Max_Window_Score"] = out["Crash_Count"]
+        else:
+            out["Max_Window_Score"] = 0
+
+    raw_score = pd.to_numeric(
+        out["Max_Window_Score"],
+        errors="coerce"
+    ).fillna(0)
+
+    if "HIN_Priority_Index" not in out.columns:
+        max_raw_score = float(raw_score.max()) if len(raw_score) else 0.0
+        if max_raw_score > 0:
+            out["HIN_Priority_Index"] = raw_score / max_raw_score * 100
+        else:
+            out["HIN_Priority_Index"] = 0.0
+
+    out["HIN_Priority_Index"] = pd.to_numeric(
+        out["HIN_Priority_Index"],
+        errors="coerce"
+    ).fillna(0.0)
+
+    if "Risk_Score" not in out.columns:
+        out["Risk_Score"] = out["HIN_Priority_Index"]
+
+    if "Crash_Count" not in out.columns:
+        out["Crash_Count"] = 0
+
+    if "EPDO" not in out.columns:
+        out["EPDO"] = out["Max_Window_Score"]
+
+    if "Risk_Flag" not in out.columns:
+        out["Risk_Flag"] = False
+
+    if "Risk_Class" not in out.columns:
+        out["Risk_Class"] = np.where(
+            out["Risk_Flag"].astype(bool),
+            "Risky",
+            "Not Risky"
+        )
+
+    return out
+
 def _make_segment_comparison_map(
     original_density=None,
     risk_segments=None,
@@ -1011,7 +1074,9 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
             route_col_s7 = st.session_state["section7_route_col_s7"]
 
             risk_windows = results["risk_windows"]
-            risk_segments = results["risk_segments"]
+            risk_segments = _ensure_hin_priority_columns(
+                results["risk_segments"]
+            )
             risk_corridors = results["risk_corridors"]
             route_lines = results["route_lines"]
             risk_threshold = results["risk_threshold"]
@@ -1045,14 +1110,21 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                 route_col_s7
             )
 
-            seg_table = (
-                risk_segments_clean
-                .drop(columns="geometry", errors="ignore")
-                .sort_values(
+            seg_table = risk_segments_clean.drop(
+                columns="geometry",
+                errors="ignore"
+            )
+
+            if "HIN_Priority_Index" in seg_table.columns:
+                seg_table = seg_table.sort_values(
                     "HIN_Priority_Index",
                     ascending=False
                 )
-            )
+            elif "Max_Window_Score" in seg_table.columns:
+                seg_table = seg_table.sort_values(
+                    "Max_Window_Score",
+                    ascending=False
+                )
 
             corridor_table = (
                 risk_corridors_clean
