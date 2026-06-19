@@ -202,17 +202,57 @@ def render_classification_step(workflow_context, spatial_unit=None):
             if st.button("Classify Uploaded Road Segment Crashes", key="classify_uploaded_segment_crashes"):
                 spatial_units = selected_roads.copy()
 
-                segment_id_col = st.session_state.get("segment_id_col", None)
+                # TIGER LINEARID and some uploaded road ID fields are not always
+                # unique after clipping, exploding, or city selection.  Use a
+                # guaranteed unique internal UnitID for crash assignment, and
+                # keep the original segment ID in SegmentID/SourceSegmentID for
+                # tables, popups, and export.  This prevents TIGER segment crash
+                # density maps from becoming empty or unstable after the join.
+                spatial_units = spatial_units[
+                    spatial_units.geometry.notna()
+                ].copy()
+                spatial_units = spatial_units[
+                    ~spatial_units.geometry.is_empty
+                ].copy()
 
-                if segment_id_col is None or segment_id_col not in spatial_units.columns:
+                try:
+                    spatial_units["geometry"] = spatial_units.geometry.make_valid()
+                    spatial_units = spatial_units.explode(
+                        index_parts=False,
+                        ignore_index=True,
+                    )
+                except Exception:
+                    spatial_units = spatial_units.reset_index(drop=True)
+
+                spatial_units = spatial_units[
+                    spatial_units.geometry.geom_type.isin(
+                        ["LineString", "MultiLineString"]
+                    )
+                ].copy()
+
+                if spatial_units.empty:
                     st.error(
-                        "Segment ID column is missing. Please select a unique segment ID column in the Road Network section."
+                        "No valid line road segments are available for crash-density classification."
                     )
                     st.stop()
 
-                spatial_units["UnitID"] = spatial_units[segment_id_col].astype(str)
+                segment_id_col = st.session_state.get("segment_id_col", None)
+
+                if segment_id_col is not None and segment_id_col in spatial_units.columns:
+                    spatial_units["SourceSegmentID"] = spatial_units[
+                        segment_id_col
+                    ].astype(str)
+                else:
+                    spatial_units["SourceSegmentID"] = (
+                        spatial_units.index + 1
+                    ).astype(str)
+
+                spatial_units = spatial_units.reset_index(drop=True)
+                spatial_units["UnitID"] = [
+                    f"SEGROW_{i + 1}" for i in range(len(spatial_units))
+                ]
                 spatial_units["UnitType"] = "Road Segment"
-                spatial_units["SegmentID"] = spatial_units["UnitID"]
+                spatial_units["SegmentID"] = spatial_units["SourceSegmentID"]
 
                 assigned_crashes = assign_crashes_to_units(
                     crashes,

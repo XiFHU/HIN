@@ -212,6 +212,7 @@ def render_results_step(st_folium, workflow_context, spatial_unit=None):
         "UnitID",
         "IntersectionID",
         "SegmentID",
+        "SourceSegmentID",
         "CorridorID",
         "Route",
         route_col,

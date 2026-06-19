@@ -244,6 +244,16 @@ def clean_for_map(gdf):
     gdf = gdf[gdf.geometry.notna()].copy()
     gdf = gdf[~gdf.geometry.is_empty].copy()
 
+    # TIGER clipping can occasionally produce GeometryCollection features.
+    # Explode them before filtering so valid line pieces are not dropped from
+    # the crash-density map.
+    try:
+        gdf = gdf.explode(index_parts=False, ignore_index=True)
+        gdf = gdf[gdf.geometry.notna()].copy()
+        gdf = gdf[~gdf.geometry.is_empty].copy()
+    except Exception:
+        pass
+
     gdf = gdf[
         gdf.geometry.geom_type.isin(
             [
@@ -708,6 +718,16 @@ def make_map(
             ]
             if c in spatial_units_plot.columns
         ]
+
+        # Keep the browser GeoJSON light and predictable. TIGER road files can
+        # carry many source attributes; only send the fields needed for popups,
+        # styling, and geometry to Folium.
+        map_cols = ["geometry"] + [
+            c for c in tooltip_fields if c in spatial_units_plot.columns
+        ]
+        spatial_units_plot = spatial_units_plot[
+            list(dict.fromkeys(map_cols))
+        ].copy()
 
         folium.GeoJson(
             spatial_units_plot,

@@ -184,6 +184,229 @@ def _ensure_hin_priority_columns(gdf):
 
     return out
 
+
+
+def _ensure_length_miles_for_hin(gdf):
+    if gdf is None or gdf.empty or "Length_Miles" in gdf.columns:
+        return gdf
+    out = gdf.copy()
+    try:
+        proj = out.to_crs(epsg=3857)
+        out["Length_Miles"] = proj.geometry.length / 1609.344
+    except Exception:
+        out["Length_Miles"] = 0.0
+    return out
+
+
+def _apply_hin_selection_controls(risk_segments_clean):
+    """Compact map-level HIN display selector.
+
+    This controls which HIN segments are displayed on the comparison map. The
+    underlying analysis results remain unchanged and can still be downloaded.
+    """
+    if risk_segments_clean is None or risk_segments_clean.empty:
+        return risk_segments_clean, "No HIN segments to display"
+
+    rank_candidates = [
+        "HIN_Priority_Index",
+        "Max_Window_Score",
+        "Crash_Count",
+        "EPDO",
+        "KSI_Count",
+        "Fatal_Injury_Count",
+    ]
+    rank_options = [c for c in rank_candidates if c in risk_segments_clean.columns]
+    if not rank_options:
+        rank_options = [risk_segments_clean.columns[0]]
+
+    capture_candidates = [
+        "KSI_Count",
+        "Fatal_Injury_Count",
+        "Crash_Count",
+        "EPDO",
+        "Max_Window_Score",
+    ]
+    capture_options = [c for c in capture_candidates if c in risk_segments_clean.columns]
+
+    container = st.popover("HIN selection ▾") if hasattr(st, "popover") else st.expander("HIN selection options", expanded=False)
+    with container:
+        st.caption(
+            "Controls which HIN segments are displayed on this map. "
+            "This does not rerun the sliding-window analysis."
+        )
+        mode = st.selectbox(
+            "Select HIN by",
+            [
+                "All HIN segments",
+                "Top X segments",
+                "Top X% of segments",
+                "Top X% of network miles",
+                "Capture at least X% of selected crash metric",
+                "Manual HIN Priority Index threshold",
+            ],
+            key="hin_display_selection_mode",
+        )
+
+        rank_by = None
+        if mode not in [
+            "All HIN segments",
+            "Manual HIN Priority Index threshold",
+            "Capture at least X% of selected crash metric",
+        ]:
+            rank_by = st.selectbox(
+                "Rank by",
+                rank_options,
+                index=rank_options.index("HIN_Priority_Index") if "HIN_Priority_Index" in rank_options else 0,
+                key="hin_display_rank_by",
+            )
+
+        top_n = None
+        top_pct = None
+        capture_metric = None
+        capture_target = None
+        manual_threshold = None
+
+        if mode == "Top X segments":
+            top_n = st.number_input(
+                "Number of top segments",
+                min_value=1,
+                value=min(50, max(1, len(risk_segments_clean))),
+                step=1,
+                key="hin_display_top_n",
+            )
+        elif mode in ["Top X% of segments", "Top X% of network miles"]:
+            top_pct = st.number_input(
+                "Top percent",
+                min_value=0.1,
+                max_value=100.0,
+                value=10.0,
+                step=0.5,
+                key="hin_display_top_pct",
+            )
+        elif mode == "Capture at least X% of selected crash metric":
+            if capture_options:
+                capture_metric = st.selectbox(
+                    "Crash metric to capture",
+                    capture_options,
+                    index=capture_options.index("Crash_Count") if "Crash_Count" in capture_options else 0,
+                    key="hin_display_capture_metric",
+                    help=(
+                        "The app ranks segments by HIN Priority Index, then adds segments until "
+                        "the selected segments capture at least this percent of the selected metric."
+                    ),
+                )
+                capture_target = st.number_input(
+                    "Target capture percent",
+                    min_value=1.0,
+                    max_value=100.0,
+                    value=80.0,
+                    step=1.0,
+                    key="hin_display_capture_pct",
+                )
+            else:
+                st.warning("No crash-count or score columns are available for capture targeting.")
+        elif mode == "Manual HIN Priority Index threshold":
+            manual_threshold = st.number_input(
+                "Minimum HIN Priority Index",
+                min_value=0.0,
+                max_value=100.0,
+                value=80.0,
+                step=1.0,
+                key="hin_display_manual_index_threshold",
+            )
+
+    out = _ensure_hin_priority_columns(risk_segments_clean).copy()
+    if mode == "All HIN segments":
+        return out, f"Showing all {len(out):,} HIN segments"
+
+    if mode == "Manual HIN Priority Index threshold":
+        values = pd.to_numeric(out.get("HIN_Priority_Index", 0), errors="coerce").fillna(0)
+        selected = out[values >= float(manual_threshold)].copy()
+        return selected, f"Showing {len(selected):,} segments with HIN Priority Index >= {float(manual_threshold):g}"
+
+    # Most selection methods rank by HIN Priority Index unless the user chooses
+    # another field. Capture targeting intentionally ranks by HIN Priority Index
+    # and reports the network share required to hit the target.
+    if mode == "Capture at least X% of selected crash metric":
+        if not capture_metric or capture_metric not in out.columns:
+            return out, f"Showing all {len(out):,} HIN segments"
+        rank_col = "HIN_Priority_Index" if "HIN_Priority_Index" in out.columns else "Max_Window_Score"
+    else:
+        rank_col = rank_by if rank_by in out.columns else (
+            "HIN_Priority_Index" if "HIN_Priority_Index" in out.columns else "Max_Window_Score"
+        )
+
+    out["__rank_value__"] = pd.to_numeric(out[rank_col], errors="coerce").fillna(0)
+    ranked = out.sort_values("__rank_value__", ascending=False).copy()
+
+    if mode == "Top X segments":
+        n = max(1, int(top_n))
+        selected = ranked.head(n).drop(columns=["__rank_value__"], errors="ignore")
+        return selected, f"Showing top {len(selected):,} segments by {rank_col}"
+
+    if mode == "Top X% of segments":
+        pct = float(top_pct)
+        n = max(1, int(round(len(ranked) * pct / 100.0)))
+        selected = ranked.head(n).drop(columns=["__rank_value__"], errors="ignore")
+        return selected, f"Showing top {pct:g}% of segments by {rank_col} ({len(selected):,} of {len(ranked):,})"
+
+    if mode == "Top X% of network miles":
+        ranked = _ensure_length_miles_for_hin(ranked)
+        ranked["__length__"] = pd.to_numeric(ranked.get("Length_Miles", 0), errors="coerce").fillna(0)
+        total_len = float(ranked["__length__"].sum())
+        if total_len <= 0:
+            pct = float(top_pct)
+            n = max(1, int(round(len(ranked) * pct / 100.0)))
+            selected = ranked.head(n).drop(columns=["__rank_value__", "__length__"], errors="ignore")
+            return selected, f"Length unavailable; showing top {pct:g}% of segments by {rank_col}"
+        target_len = total_len * float(top_pct) / 100.0
+        ranked["__cum_length__"] = ranked["__length__"].cumsum()
+        selected = ranked[ranked["__cum_length__"] <= target_len].copy()
+        if selected.empty:
+            selected = ranked.head(1).copy()
+        else:
+            next_rows = ranked[ranked["__cum_length__"] > target_len].head(1)
+            if not next_rows.empty:
+                selected = pd.concat([selected, next_rows], ignore_index=False)
+        selected_len = float(selected["__length__"].sum())
+        selected = selected.drop(columns=["__rank_value__", "__length__", "__cum_length__"], errors="ignore")
+        return selected, f"Showing top {float(top_pct):g}% of network miles by {rank_col} ({selected_len:.2f} of {total_len:.2f} mi)"
+
+    if mode == "Capture at least X% of selected crash metric":
+        ranked = _ensure_length_miles_for_hin(ranked)
+        ranked["__capture__"] = pd.to_numeric(ranked[capture_metric], errors="coerce").fillna(0)
+        total_capture = float(ranked["__capture__"].sum())
+        if total_capture <= 0:
+            selected = ranked.drop(columns=["__rank_value__", "__capture__"], errors="ignore")
+            return selected, f"{capture_metric} total is zero; showing all HIN segments"
+        target_value = total_capture * float(capture_target) / 100.0
+        ranked["__cum_capture__"] = ranked["__capture__"].cumsum()
+        selected = ranked[ranked["__cum_capture__"] <= target_value].copy()
+        if selected.empty:
+            selected = ranked.head(1).copy()
+        else:
+            next_rows = ranked[ranked["__cum_capture__"] > target_value].head(1)
+            if not next_rows.empty:
+                selected = pd.concat([selected, next_rows], ignore_index=False)
+        selected_capture = float(selected["__capture__"].sum())
+        selected_pct = selected_capture / total_capture * 100.0 if total_capture > 0 else 0.0
+        selected = _ensure_length_miles_for_hin(selected)
+        all_len = pd.to_numeric(ranked.get("Length_Miles", 0), errors="coerce").fillna(0)
+        sel_len = pd.to_numeric(selected.get("Length_Miles", 0), errors="coerce").fillna(0)
+        total_len = float(all_len.sum()) if len(all_len) else 0.0
+        selected_len = float(sel_len.sum()) if len(sel_len) else 0.0
+        network_share = selected_len / total_len * 100.0 if total_len > 0 else 0.0
+        selected = selected.drop(
+            columns=["__rank_value__", "__capture__", "__cum_capture__"],
+            errors="ignore",
+        )
+        return selected, (
+            f"Selected {len(selected):,} segments to capture {selected_pct:.1f}% of {capture_metric}; "
+            f"network share = {network_share:.1f}% ({selected_len:.2f} of {total_len:.2f} mi)"
+        )
+
+    return out.drop(columns=["__rank_value__"], errors="ignore"), f"Showing all {len(out):,} HIN segments"
+
 def _make_segment_comparison_map(
     original_density=None,
     risk_segments=None,
@@ -1246,6 +1469,27 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                 "Current Spatial Units / Crash Density = density from the latest Classification / Results units."
             )
 
+            hin_select_col, _hin_space_col = st.columns([0.34, 0.66])
+            with hin_select_col:
+                risk_segments_map, hin_selection_summary = _apply_hin_selection_controls(
+                    risk_segments_clean
+                )
+            st.caption(hin_selection_summary)
+
+            risk_corridors_map = risk_corridors_clean
+            if (
+                risk_segments_map is not None
+                and not risk_segments_map.empty
+                and risk_corridors_clean is not None
+                and not risk_corridors_clean.empty
+                and "CorridorID" in risk_segments_map.columns
+                and "CorridorID" in risk_corridors_clean.columns
+            ):
+                selected_corridor_ids = set(risk_segments_map["CorridorID"].astype(str))
+                risk_corridors_map = risk_corridors_clean[
+                    risk_corridors_clean["CorridorID"].astype(str).isin(selected_corridor_ids)
+                ].copy()
+
             risk_score_symbology = render_numeric_symbology_controls(
                 "HIN priority index",
                 key_prefix="section7_hin_risk_score",
@@ -1288,8 +1532,8 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
 
             comparison_map = _make_segment_comparison_map(
                 original_density=original_density,
-                risk_segments=risk_segments_clean,
-                risk_corridors=risk_corridors_clean,
+                risk_segments=risk_segments_map,
+                risk_corridors=risk_corridors_map,
                 crashes=crashes_for_map,
                 roads=selected_roads,
                 roads_class=st.session_state.get("roads_class_display", None),
@@ -1310,9 +1554,9 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                     "section7_segment_comparison_map_"
                     + "_".join(comparison_layers)
                     + "_"
-                    + str(len(risk_segments_clean))
+                    + str(len(risk_segments_map) if risk_segments_map is not None else 0)
                     + "_"
-                    + str(len(risk_corridors_clean))
+                    + str(len(risk_corridors_map) if risk_corridors_map is not None else 0)
                 )
             )
 
