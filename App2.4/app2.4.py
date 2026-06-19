@@ -122,7 +122,9 @@ st.markdown(
 
     [data-testid="stSidebar"] {
         min-width: 340px !important;
-        overflow: visible !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+        overflow: hidden !important;
         background: rgba(
             248,
             249,
@@ -132,32 +134,48 @@ st.markdown(
         border-right: 1px solid #cfcfcf;
     }
 
-    [data-testid="stSidebar"] > div:first-child {
+    /* Robust sidebar scrolling.
+       Streamlit's sidebar DOM can change after switching the workflow tabs.
+       Target both the older first-child container and the newer
+       stSidebarContent container so the control panel always remains
+       scrollable all the way to the bottom. */
+    [data-testid="stSidebar"] > div:first-child,
+    [data-testid="stSidebarContent"] {
         height: calc(100vh - 2.2rem) !important;
         max-height: calc(100vh - 2.2rem) !important;
-        overflow-y: auto !important;
+        min-height: 0 !important;
+        overflow-y: scroll !important;
         overflow-x: hidden !important;
 
         padding-top: 0.45rem !important;
         padding-left: 0.55rem !important;
         padding-right: 0.55rem !important;
-        padding-bottom: 60vh !important;
+        padding-bottom: 220px !important;
 
         box-sizing: border-box !important;
+        overscroll-behavior: contain !important;
 
         scrollbar-width: thin;
         scrollbar-color: #777 #e9ecef;
     }
 
-    [data-testid="stSidebar"] > div:first-child::-webkit-scrollbar {
+    [data-testid="stSidebar"] > div:first-child > div,
+    [data-testid="stSidebarContent"] > div {
+        padding-bottom: 220px !important;
+    }
+
+    [data-testid="stSidebar"] > div:first-child::-webkit-scrollbar,
+    [data-testid="stSidebarContent"]::-webkit-scrollbar {
         width: 10px !important;
     }
 
-    [data-testid="stSidebar"] > div:first-child::-webkit-scrollbar-track {
+    [data-testid="stSidebar"] > div:first-child::-webkit-scrollbar-track,
+    [data-testid="stSidebarContent"]::-webkit-scrollbar-track {
         background: #e9ecef !important;
     }
 
-    [data-testid="stSidebar"] > div:first-child::-webkit-scrollbar-thumb {
+    [data-testid="stSidebar"] > div:first-child::-webkit-scrollbar-thumb,
+    [data-testid="stSidebarContent"]::-webkit-scrollbar-thumb {
         background: #777 !important;
         border-radius: 10px !important;
     }
