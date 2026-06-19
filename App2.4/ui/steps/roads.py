@@ -1231,45 +1231,6 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                     "No displayable road attribute columns found."
                 )
 
-        from_to_download_cols = []
-
-        for c in [
-            st.session_state.get("route_col"),
-            st.session_state.get("segment_id_col"),
-            "FULLNAME",
-            "RouteName_Calc",
-            "FromMile",
-            "ToMile",
-            "SegmentLength_Mile",
-            "FunctionalClass",
-            "RoadClass",
-            st.session_state.get("analysis_road_class_col")
-        ]:
-            if (
-                c is not None
-                and c in analysis_roads.columns
-                and c not in from_to_download_cols
-            ):
-                from_to_download_cols.append(c)
-
-        if not from_to_download_cols:
-            from_to_download_cols = [
-                c for c in analysis_roads.columns
-                if c != "geometry"
-            ]
-
-        csv = analysis_roads[
-            from_to_download_cols
-        ].to_csv(
-            index=False
-        )
-
-        st.download_button(
-            "Download Analysis Roads FromMile / ToMile CSV",
-            data=csv,
-            file_name="analysis_roads_from_to_mile.csv",
-            mime="text/csv"
-        )
 
         fmap = make_map(
             boundary=selected_boundary,

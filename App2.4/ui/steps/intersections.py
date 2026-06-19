@@ -126,13 +126,6 @@ def render_intersections_step(st_folium, workflow_context, spatial_unit=None):
             ]
             st.dataframe(table[display_cols], width="stretch")
 
-            st.download_button(
-                "Download Intersection Locations CSV",
-                table[display_cols].to_csv(index=False),
-                file_name="intersection_locations.csv",
-                mime="text/csv",
-                key="download_intersection_locations_csv",
-            )
 
         fmap = make_map(
             boundary=selected_boundary,

@@ -511,7 +511,7 @@ def _make_segment_comparison_map(
                 c for c in [
                     "CorridorID",
                     "Route",
-                    "Max_Risk_Score",
+                    "Max_HIN_Index",
                     "Risk_Segment_Count"
                 ]
                 if c in risk_corridors.columns
@@ -532,14 +532,14 @@ def _make_segment_comparison_map(
                 ) if tooltip_fields else None
             ).add_to(fmap)
 
-    if "HIN Risk Score" in selected_layers or "Risk Segments" in selected_layers:
+    if "HIN Priority Index" in selected_layers or "Risk Segments" in selected_layers:
         risk_segments = clean_for_map(risk_segments)
 
         if risk_segments is not None and not risk_segments.empty:
             risk_segments = make_map_safe_gdf(
                 risk_segments,
                 numeric_cols=[
-                    "Risk_Score",
+                    "HIN_Priority_Index",
                     "CrashCount",
                     "EPDO",
                     "Length_Miles"
@@ -547,19 +547,19 @@ def _make_segment_comparison_map(
             )
 
             values = pd.to_numeric(
-                risk_segments["Risk_Score"],
+                risk_segments["HIN_Priority_Index"],
                 errors="coerce"
             ).fillna(0)
 
             risk_cmap = make_numeric_colormap(
                 values,
                 cm,
-                "HIN Risk Score",
+                "HIN Priority Index",
                 settings=risk_score_symbology,
             )
 
             def style_risk_segment(feature):
-                value = feature["properties"].get("Risk_Score", 0)
+                value = feature["properties"].get("HIN_Priority_Index", 0)
                 try:
                     value = float(value)
                 except Exception:
@@ -579,7 +579,7 @@ def _make_segment_comparison_map(
                     "UnitID",
                     "Route",
                     "FULLNAME",
-                    "Risk_Score",
+                    "HIN_Priority_Index",
                     "CrashCount",
                     "EPDO",
                     "FromMile",
@@ -590,7 +590,7 @@ def _make_segment_comparison_map(
 
             folium.GeoJson(
                 make_json_safe_gdf(risk_segments),
-                name="HIN Risk Score",
+                name="HIN Priority Index",
                 style_function=style_risk_segment,
                 tooltip=folium.GeoJsonTooltip(
                     fields=tooltip_fields,
@@ -721,7 +721,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                 ],
                 index=0,
                 key="section7_segmentation_method",
-                help="This controls the final HIN Risk Score line segments shown on the map. It does not change how crashes are counted inside each sliding window."
+                help="This controls the final HIN Priority Index line segments shown on the map. It does not change how crashes are counted inside each sliding window."
             )
 
             with st.expander("How each output segment method works", expanded=False):
@@ -737,7 +737,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                     The app keeps the original uploaded/OSM road segment geometry as the final HIN output unit. Each original segment receives the highest overlapping window score. This is useful when you need results to match an existing GIS roadway layer, but segment lengths may vary and the map may be less comparable across routes.
 
                     **Score logic for all three methods**  
-                    The HIN Risk Score is based on the selected risk metric. If the metric is Crash Count, the score is the maximum overlapping window crash count. If the metric is EPDO, the score is the maximum overlapping window severity-weighted total. The top-percent threshold is then applied to those final segment scores.
+                    The app first stores the raw maximum overlapping window value as **Max_Window_Score**. If the metric is Crash Count, that raw value is the maximum overlapping window crash count. If the metric is EPDO, that raw value is the maximum overlapping window EPDO total. The displayed **HIN Priority Index** is normalized to a 0–100 scale using: **HIN Priority Index = Max_Window_Score / max(Max_Window_Score) × 100**. This is a relative screening index, not a final adopted HIN designation. The top-percent threshold is then applied to the normalized HIN Priority Index.
                     """
                 )
 
@@ -810,7 +810,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                 )
 
             risk_metric = st.radio(
-                "Risk Metric",
+                "Scoring Metric",
                 [
                     "Crash Count",
                     "EPDO"
@@ -846,7 +846,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
             with st.expander("Metric definitions", expanded=True):
                 st.markdown(
                     """
-                    **How the HIN Risk Score is calculated**
+                    **How the HIN Priority Index is calculated**
 
                     1. Crashes are snapped to the nearest selected route within the crash-to-route search distance.
                     2. A fixed-length sliding window moves along each route.
@@ -858,7 +858,8 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
 
                     - **Crash Count** counts every crash as 1. A fatal crash, injury crash, and PDO/no-injury crash have the same weight.
                     - **EPDO** is a severity-weighted crash score. Each crash is converted to a weighted value using the K/A/B/C/O weights below, then the weights are summed in each sliding window.
-                    - **HIN Risk Score** is the final score assigned to each output segment. If the selected metric is Crash Count, the HIN Risk Score is based on the maximum overlapping window crash count. If the selected metric is EPDO, the HIN Risk Score is based on the maximum overlapping window EPDO total.
+                    - **Max_Window_Score** is the raw maximum score from the windows that overlap each output segment. If the selected metric is Crash Count, this is the maximum overlapping window crash count. If the selected metric is EPDO, this is the maximum overlapping window EPDO total.
+                    - **HIN Priority Index** is the normalized 0–100 screening index assigned to each output segment: **HIN Priority Index = Max_Window_Score / max(Max_Window_Score) × 100**. For EPDO analysis, this is equivalent to **Max overlapping window EPDO / max(Max overlapping window EPDO) × 100**. The highest-scoring segment becomes 100, and other segments are scaled relative to it. This index supports HIN screening and comparison; it is not the final adopted HIN designation by itself.
                     - **Optional minimum crash count filter** removes output segments with fewer than the entered number of crashes before the final top-percent risky segment selection. For example, a value of 1 removes zero-crash segments, while a value of 4 keeps only segments with 4 or more crashes.
 
                     Density metrics are not used in the sliding-window selector because fixed-length windows make density and count-based maps nearly identical. Use the final comparison map to compare HIN risk against the original crash-density layer.
@@ -1048,7 +1049,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                 risk_segments_clean
                 .drop(columns="geometry", errors="ignore")
                 .sort_values(
-                    "Risk_Score",
+                    "HIN_Priority_Index",
                     ascending=False
                 )
             )
@@ -1057,7 +1058,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                 risk_corridors_clean
                 .drop(columns="geometry", errors="ignore")
                 .sort_values(
-                    "Max_Risk_Score",
+                    "Max_HIN_Index",
                     ascending=False
                 )
                 if not risk_corridors_clean.empty
@@ -1124,7 +1125,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
             # -----------------------------
 
             comparison_layer_options = [
-                "HIN Risk Score",
+                "HIN Priority Index",
                 "Risk Corridors",
                 "Original Crash Density",
                 "Current Spatial Units / Crash Density",
@@ -1136,7 +1137,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
             ]
 
             default_comparison_layers = [
-                "HIN Risk Score",
+                "HIN Priority Index",
                 "Risk Corridors",
                 "Original Crash Density",
             ]
@@ -1174,7 +1175,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
             )
 
             risk_score_symbology = render_numeric_symbology_controls(
-                "HIN risk score",
+                "HIN priority index",
                 key_prefix="section7_hin_risk_score",
                 default_method="Quantile",
             )

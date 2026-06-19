@@ -397,30 +397,10 @@ def render_corridors_step(st_folium, workflow_context, spatial_unit=None):
             width="stretch"
         )
 
-        st.download_button(
-            "Download Signals With CorridorID CSV",
-            export_csv_bytes(signal_corridor_table),
-            file_name="signals_with_corridor_id.csv",
-            mime="text/csv",
-            key="download_signals_with_corridor_csv"
-        )
 
-    if corridor_summary is not None:
+    # Corridor Signal Summary table is intentionally hidden.
+    # The detailed Signals With CorridorID table remains available above.
 
-        st.subheader("Corridor Signal Summary")
-
-        st.dataframe(
-            corridor_summary,
-            width="stretch"
-        )
-
-        st.download_button(
-            "Download Corridor Summary CSV",
-            export_csv_bytes(corridor_summary),
-            file_name="corridor_summary.csv",
-            mime="text/csv",
-            key="download_corridor_summary_csv"
-        )
 
     if corridors is not None:
 

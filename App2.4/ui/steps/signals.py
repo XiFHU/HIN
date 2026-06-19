@@ -149,12 +149,6 @@ def render_signals_step(st_folium, workflow_context, spatial_unit=None):
             width="stretch"
         )
 
-        st.download_button(
-            "Download Cleaned Signals CSV",
-            signals_table.to_csv(index=False),
-            file_name="cleaned_signals.csv",
-            mime="text/csv"
-        )
 
         fmap = make_map(
             boundary=selected_boundary,

@@ -18,8 +18,9 @@ def section7_clean_risk_segments(
         "ToMile",
         "Crash_Count",
         "EPDO",
-        "Risk_Score",
         "Max_Window_Score",
+        "HIN_Priority_Index",
+        "Risk_Score",
         "Risk_Flag",
         "Risk_Class"
     ]
@@ -41,8 +42,8 @@ def section7_clean_risk_corridors(
         "FromMile",
         "ToMile",
         "Segment_Count",
-        "Max_Risk_Score",
-        "Avg_Risk_Score"
+        "Max_HIN_Index",
+        "Avg_HIN_Index"
     ]
 
     return clean_section7_output_gdf(
@@ -462,7 +463,7 @@ def create_sliding_windows(
                     "Window_Length_Mi": length_mi,
                     "Crash_Count": crash_count,
                     "EPDO": epdo_total,
-                    "Risk_Score": score,
+                    "Window_Score": score,
                     "geometry": geom
                 }
             )
@@ -485,34 +486,34 @@ def score_segments(
 ):
     segs = base_segments.copy()
 
-    positive = risk_windows[
-        risk_windows["Risk_Score"] > 0
+    positive_windows = risk_windows[
+        risk_windows["Window_Score"] > 0
     ].copy()
 
-    if positive.empty:
+    if positive_windows.empty:
         segs["Crash_Count"] = 0
         segs["EPDO"] = 0
-        segs["Risk_Score"] = 0
         segs["Max_Window_Score"] = 0
+        segs["HIN_Priority_Index"] = 0
+        segs["Risk_Score"] = 0
         segs["Risk_Flag"] = False
         segs["Risk_Class"] = "Not Risky"
 
-        return segs, positive, 0
+        return segs, positive_windows, 0
 
-    threshold = positive[
-        "Risk_Score"
+    raw_window_threshold = positive_windows[
+        "Window_Score"
     ].quantile(
         1 - top_percent / 100
     )
 
-    risky_windows = positive[
-        positive["Risk_Score"] >= threshold
+    risky_windows = positive_windows[
+        positive_windows["Window_Score"] >= raw_window_threshold
     ].copy()
 
     max_scores = []
     max_crash_counts = []
     max_epdo_scores = []
-    risk_flags = []
 
     for _, seg in segs.iterrows():
         route_name = seg[route_col]
@@ -531,11 +532,10 @@ def score_segments(
             max_scores.append(0)
             max_crash_counts.append(0)
             max_epdo_scores.append(0)
-            risk_flags.append(False)
 
         else:
             max_score = touching[
-                "Risk_Score"
+                "Window_Score"
             ].max()
 
             max_crash_count = (
@@ -562,15 +562,44 @@ def score_segments(
                 max_epdo
             )
 
-            risk_flags.append(
-                max_score >= threshold
-            )
-
     segs["Max_Window_Score"] = max_scores
-    segs["Risk_Score"] = max_scores
     segs["Crash_Count"] = max_crash_counts
     segs["EPDO"] = max_epdo_scores
-    segs["Risk_Flag"] = risk_flags
+
+    max_raw_score = float(
+        pd.to_numeric(
+            segs["Max_Window_Score"],
+            errors="coerce"
+        ).max()
+    )
+
+    if pd.isna(max_raw_score) or max_raw_score <= 0:
+        segs["HIN_Priority_Index"] = 0
+    else:
+        segs["HIN_Priority_Index"] = (
+            pd.to_numeric(
+                segs["Max_Window_Score"],
+                errors="coerce"
+            ).fillna(0) / max_raw_score * 100
+        )
+
+    # Backward-compatible alias. Use HIN_Priority_Index in the UI/map.
+    segs["Risk_Score"] = segs["HIN_Priority_Index"]
+
+    positive_segments = segs[
+        segs["HIN_Priority_Index"] > 0
+    ].copy()
+
+    if positive_segments.empty:
+        threshold = 0
+        segs["Risk_Flag"] = False
+    else:
+        threshold = positive_segments["HIN_Priority_Index"].quantile(
+            1 - top_percent / 100
+        )
+        segs["Risk_Flag"] = (
+            segs["HIN_Priority_Index"] >= threshold
+        )
 
     segs["Risk_Class"] = np.where(
         segs["Risk_Flag"],
@@ -579,7 +608,6 @@ def score_segments(
     )
 
     return segs, risky_windows, threshold
-
 
 def build_risk_corridors(
     risk_segments,
@@ -597,8 +625,8 @@ def build_risk_corridors(
                 route_col,
                 "CorridorID",
                 "Segment_Count",
-                "Max_Risk_Score",
-                "Avg_Risk_Score",
+                "Max_HIN_Index",
+                "Avg_HIN_Index",
                 "geometry"
             ],
             geometry="geometry",
@@ -635,8 +663,8 @@ def build_risk_corridors(
                     route_col: route_name,
                     "CorridorID": f"{route_name}_{i}",
                     "Segment_Count": len(related),
-                    "Max_Risk_Score": related["Risk_Score"].max(),
-                    "Avg_Risk_Score": related["Risk_Score"].mean(),
+                    "Max_HIN_Index": related["HIN_Priority_Index"].max(),
+                    "Avg_HIN_Index": related["HIN_Priority_Index"].mean(),
                     "geometry": g
                 }
             )
@@ -783,7 +811,7 @@ def run_sliding_window_risk_analysis(
         ].copy()
 
         positive_segments = risk_segments[
-            risk_segments["Risk_Score"] > 0
+            risk_segments["HIN_Priority_Index"] > 0
         ].copy()
 
         if positive_segments.empty:
@@ -791,11 +819,11 @@ def run_sliding_window_risk_analysis(
             risk_segments["Risk_Flag"] = False
             risk_segments["Risk_Class"] = "Not Risky"
         else:
-            risk_threshold = positive_segments["Risk_Score"].quantile(
+            risk_threshold = positive_segments["HIN_Priority_Index"].quantile(
                 1 - top_percent / 100
             )
             risk_segments["Risk_Flag"] = (
-                risk_segments["Risk_Score"] >= risk_threshold
+                risk_segments["HIN_Priority_Index"] >= risk_threshold
             )
             risk_segments["Risk_Class"] = np.where(
                 risk_segments["Risk_Flag"],
@@ -939,8 +967,8 @@ def make_section7_context_map(
 
     corridor_group.add_to(m)
 
-    vmin = risky["Risk_Score"].min()
-    vmax = risky["Risk_Score"].max()
+    vmin = risky["HIN_Priority_Index"].min()
+    vmax = risky["HIN_Priority_Index"].max()
 
     risk_group = folium.FeatureGroup(
         name="Risk Segments",
@@ -949,7 +977,7 @@ def make_section7_context_map(
 
     for _, row in risky.iterrows():
         color = color_by_value(
-            row["Risk_Score"],
+            row["HIN_Priority_Index"],
             vmin,
             vmax
         )
@@ -967,7 +995,7 @@ def make_section7_context_map(
                 Segment ID: {row.get("SegID", "")}<br>
                 FromMile: {row.get("FromMile", "")}<br>
                 ToMile: {row.get("ToMile", "")}<br>
-                Risk Score: {row.get("Risk_Score", 0):.3f}<br>
+                HIN Priority Index (0-100): {row.get("HIN_Priority_Index", 0):.3f}<br>
                 Risk Class: {row.get("Risk_Class", "")}
                 """,
                 max_width=300
@@ -988,7 +1016,7 @@ def make_section7_context_map(
         padding: 10px;
         font-size: 13px;
     ">
-        <b>Risk Score</b><br>
+        <b>HIN Priority Index (0-100)</b><br>
         <i style="background:#a6d96a;width:18px;height:12px;display:inline-block;"></i>
         Low<br>
         <i style="background:#ffffbf;width:18px;height:12px;display:inline-block;"></i>
