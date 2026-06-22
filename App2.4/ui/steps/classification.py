@@ -1,12 +1,58 @@
 """Crash classification and spatial-unit creation UI."""
 
 
+def _filter_roads_to_final_corridors(roads, final_corridors):
+    """Return only roads that intersect the final, not-dropped corridors."""
+
+    if roads is None:
+        return roads
+
+    if final_corridors is None:
+        return roads
+
+    if getattr(final_corridors, "empty", True):
+        return roads.iloc[0:0].copy()
+
+    if "geometry" not in roads.columns or "geometry" not in final_corridors.columns:
+        return roads
+
+    roads_work = roads.copy()
+    corridors_work = final_corridors.copy()
+
+    if roads_work.crs is None:
+        roads_work = roads_work.set_crs(epsg=4326)
+
+    if corridors_work.crs is None:
+        corridors_work = corridors_work.set_crs(roads_work.crs)
+
+    if corridors_work.crs != roads_work.crs:
+        corridors_work = corridors_work.to_crs(roads_work.crs)
+
+    valid_roads = (
+        roads_work.geometry.notna()
+        & ~roads_work.geometry.is_empty
+    )
+
+    if not valid_roads.any():
+        return roads_work.iloc[0:0].copy()
+
+    try:
+        corridor_union = corridors_work.geometry.unary_union
+        mask = valid_roads & roads_work.geometry.intersects(corridor_union)
+        return roads_work[mask].copy()
+    except Exception:
+        return roads_work[valid_roads].copy()
+
+
 def render_classification_step(workflow_context, spatial_unit=None):
     globals().update(workflow_context)
 
     selected_roads = st.session_state.get("selected_roads", None)
     signals_clean = st.session_state.get("signals_clean", None)
-    corridors = st.session_state.get("corridors", None)
+    corridors = st.session_state.get(
+        "final_corridors",
+        st.session_state.get("corridors", None)
+    )
     crashes = st.session_state.get("crashes", None)
 
     if spatial_unit == "Intersection":
@@ -106,6 +152,16 @@ def render_classification_step(workflow_context, spatial_unit=None):
             st.warning("Build corridors first.")
             return
 
+        if corridors.empty:
+            st.warning(
+                "No final corridors are available. Review the dropped CorridorIDs and keep at least one corridor."
+            )
+            return
+
+        st.caption(
+            f"Using final corridors after CorridorID drops: {len(corridors):,} corridor(s)."
+        )
+
         if st.button("Classify Corridor Crashes", key="classify_corridor_crashes"):
             spatial_units = create_corridor_units(corridors)
 
@@ -157,6 +213,28 @@ def render_classification_step(workflow_context, spatial_unit=None):
             st.warning("Select roads first.")
             return
 
+        final_corridors_for_segments = st.session_state.get(
+            "final_corridors",
+            st.session_state.get("corridors", None)
+        )
+
+        roads_for_segments = _filter_roads_to_final_corridors(
+            selected_roads,
+            final_corridors_for_segments
+        )
+
+        if final_corridors_for_segments is not None:
+            st.caption(
+                f"Road segment classification is using roads inside the final corridor layer: "
+                f"{len(roads_for_segments):,} of {len(selected_roads):,} selected road feature(s)."
+            )
+
+        if roads_for_segments is None or roads_for_segments.empty:
+            st.warning(
+                "No roads intersect the final corridors. Review the dropped CorridorIDs or rebuild corridors before segment classification."
+            )
+            return
+
         if segment_unit_method == "Create equal-length segments":
             segment_length_ft = st.number_input(
                 "Road segment length, feet",
@@ -169,7 +247,7 @@ def render_classification_step(workflow_context, spatial_unit=None):
 
             if st.button("Classify Road Segment Crashes", key="classify_equal_segment_crashes"):
                 spatial_units = create_road_segment_units(
-                    selected_roads,
+                    roads_for_segments,
                     segment_length_ft=segment_length_ft,
                 )
 
@@ -200,7 +278,7 @@ def render_classification_step(workflow_context, spatial_unit=None):
 
         elif segment_unit_method == "Use uploaded road segments":
             if st.button("Classify Uploaded Road Segment Crashes", key="classify_uploaded_segment_crashes"):
-                spatial_units = selected_roads.copy()
+                spatial_units = roads_for_segments.copy()
 
                 # TIGER LINEARID and some uploaded road ID fields are not always
                 # unique after clipping, exploding, or city selection.  Use a

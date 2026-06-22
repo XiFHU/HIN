@@ -39,6 +39,11 @@ def render_corridors_step(st_folium, workflow_context, spatial_unit=None):
         None
     )
 
+    final_corridors = st.session_state.get(
+        "final_corridors",
+        corridors
+    )
+
     signals_with_corridor = st.session_state.get(
         "signals_with_corridor",
         None
@@ -308,11 +313,28 @@ def render_corridors_step(st_folium, workflow_context, spatial_unit=None):
                     ] = corridors
 
                     st.session_state[
+                        "final_corridors"
+                    ] = corridors.copy()
+
+                    st.session_state[
+                        "dropped_corridor_ids"
+                    ] = []
+
+                    st.session_state[
+                        "applied_dropped_corridor_ids"
+                    ] = []
+
+                    st.session_state[
                         "corridor_roads"
                     ] = corridor_roads
 
                     st.session_state.pop(
                         "spatial_units",
+                        None
+                    )
+
+                    st.session_state.pop(
+                        "spatial_units_density_map",
                         None
                     )
 
@@ -404,7 +426,125 @@ def render_corridors_step(st_folium, workflow_context, spatial_unit=None):
 
     if corridors is not None:
 
-        st.subheader("Corridor Map")
+        st.subheader("Review / Drop Corridors")
+
+        if corridors.empty:
+
+            final_corridors = corridors.copy()
+            st.session_state["final_corridors"] = final_corridors
+            st.info("No corridors are available to review.")
+
+        elif "CorridorID" not in corridors.columns:
+
+            final_corridors = corridors.copy()
+            st.session_state["final_corridors"] = final_corridors
+            st.warning(
+                "CorridorID was not found, so corridors cannot be dropped by ID."
+            )
+
+        else:
+
+            corridor_id_options = sorted(
+                corridors["CorridorID"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+
+            previous_applied_drop_ids = set(
+                st.session_state.get(
+                    "applied_dropped_corridor_ids",
+                    []
+                )
+            )
+
+            default_drop_ids = [
+                corridor_id
+                for corridor_id in st.session_state.get(
+                    "dropped_corridor_ids",
+                    []
+                )
+                if corridor_id in corridor_id_options
+            ]
+
+            drop_corridor_ids = st.multiselect(
+                "Drop corridors by CorridorID before segmentation/results",
+                options=corridor_id_options,
+                default=default_drop_ids,
+                key="corridors_drop_by_id_select",
+                help=(
+                    "Dropped corridors are removed from the final corridor layer. "
+                    "Corridor crash classification, road segmentation, and sliding-window HIN analysis "
+                    "will use only the remaining final corridors."
+                )
+            )
+
+            current_drop_ids = set(drop_corridor_ids)
+
+            final_corridors = corridors[
+                ~corridors["CorridorID"].astype(str).isin(
+                    current_drop_ids
+                )
+            ].copy()
+
+            st.session_state["dropped_corridor_ids"] = list(
+                drop_corridor_ids
+            )
+            st.session_state["final_corridors"] = final_corridors
+
+            if current_drop_ids != previous_applied_drop_ids:
+
+                st.session_state[
+                    "applied_dropped_corridor_ids"
+                ] = list(drop_corridor_ids)
+
+                for stale_key in [
+                    "spatial_units",
+                    "spatial_units_density_map",
+                    "assigned_crashes",
+                    "kabco_result",
+                    "section7_results",
+                    "section7_original_density",
+                    "section7_crashes_for_map"
+                ]:
+                    st.session_state.pop(stale_key, None)
+
+                st.session_state[
+                    "active_map_layer"
+                ] = "Corridors"
+
+                if drop_corridor_ids:
+                    st.info(
+                        "Corridor drop list changed. Downstream crash classification, "
+                        "density, and sliding-window results were cleared so they can be rebuilt "
+                        "from the final corridors."
+                    )
+
+            st.write(
+                f"Original corridors: {len(corridors):,} | "
+                f"Dropped: {len(drop_corridor_ids):,} | "
+                f"Final corridors: {len(final_corridors):,}"
+            )
+
+            if final_corridors.empty:
+                st.warning(
+                    "All corridors are currently dropped. Keep at least one corridor before running segmentation or crash analysis."
+                )
+
+            with st.expander(
+                "View final corridors table",
+                expanded=False
+            ):
+                st.dataframe(
+                    final_corridors.drop(
+                        columns="geometry",
+                        errors="ignore"
+                    ),
+                    width="stretch"
+                )
+
+        st.subheader("Final Corridor Map")
 
         try:
 
@@ -426,7 +566,7 @@ def render_corridors_step(st_folium, workflow_context, spatial_unit=None):
                 roads=corridor_roads_for_map,
                 roads_class=None,
                 signals=signals_for_map,
-                corridors=corridors
+                corridors=final_corridors
             )
 
             st_folium(
@@ -453,8 +593,8 @@ def render_corridors_step(st_folium, workflow_context, spatial_unit=None):
 
                 corridor_shp_bytes = (
                     export_shapefile_zip_bytes(
-                        corridors,
-                        "corridors"
+                        final_corridors,
+                        "final_corridors"
                     )
                 )
 
@@ -469,17 +609,17 @@ def render_corridors_step(st_folium, workflow_context, spatial_unit=None):
             except Exception as e:
 
                 st.error(
-                    f"Could not create Corridor Shapefile ZIP: {e}"
+                    f"Could not create Final Corridor Shapefile ZIP: {e}"
                 )
 
         if "corridor_shp_bytes" in st.session_state:
 
             st.download_button(
-                "Download Corridor Shapefile ZIP",
+                "Download Final Corridor Shapefile ZIP",
                 st.session_state[
                     "corridor_shp_bytes"
                 ],
-                file_name="corridors_shapefile.zip",
+                file_name="final_corridors_shapefile.zip",
                 mime="application/zip",
                 key="download_corridor_shp"
             )

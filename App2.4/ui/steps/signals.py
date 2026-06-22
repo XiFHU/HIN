@@ -80,6 +80,21 @@ def render_signals_step(st_folium, workflow_context, spatial_unit=None):
                 )
 
                 st.session_state.pop(
+                    "final_corridors",
+                    None
+                )
+
+                st.session_state.pop(
+                    "dropped_corridor_ids",
+                    None
+                )
+
+                st.session_state.pop(
+                    "applied_dropped_corridor_ids",
+                    None
+                )
+
+                st.session_state.pop(
                     "corridor_signal_summary",
                     None
                 )

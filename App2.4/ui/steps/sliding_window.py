@@ -72,6 +72,50 @@ def _build_original_crash_density_layer(selected_roads, crashes_s7, segment_id_c
     return original_density
 
 
+def _filter_roads_to_final_corridors(roads, final_corridors):
+    """Return only roads that intersect the final, not-dropped corridors."""
+
+    if roads is None:
+        return roads
+
+    if final_corridors is None:
+        return roads
+
+    if getattr(final_corridors, "empty", True):
+        return roads.iloc[0:0].copy()
+
+    if "geometry" not in roads.columns or "geometry" not in final_corridors.columns:
+        return roads
+
+    roads_work = roads.copy()
+    corridors_work = final_corridors.copy()
+
+    if roads_work.crs is None:
+        roads_work = roads_work.set_crs(epsg=4326)
+
+    if corridors_work.crs is None:
+        corridors_work = corridors_work.set_crs(roads_work.crs)
+
+    if corridors_work.crs != roads_work.crs:
+        corridors_work = corridors_work.to_crs(roads_work.crs)
+
+    valid_roads = (
+        roads_work.geometry.notna()
+        & ~roads_work.geometry.is_empty
+    )
+
+    if not valid_roads.any():
+        return roads_work.iloc[0:0].copy()
+
+    try:
+        corridor_union = corridors_work.geometry.unary_union
+        mask = valid_roads & roads_work.geometry.intersects(corridor_union)
+        roads_filtered = roads_work[mask].copy()
+    except Exception:
+        roads_filtered = roads_work[valid_roads].copy()
+
+    return roads_filtered
+
 
 def _add_road_class_legend_to_map(fmap, color_lookup):
     """Add a compact road class/type legend for the Segment comparison map.
@@ -965,6 +1009,10 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
 
     selected_roads = st.session_state.get("selected_roads", None)
     crashes = st.session_state.get("crashes", None)
+    final_corridors = st.session_state.get(
+        "final_corridors",
+        st.session_state.get("corridors", None)
+    )
 
     if selected_roads is None:
         st.warning("Please upload/select roads first.")
@@ -973,13 +1021,30 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
         st.warning("Please upload crash data first.")
 
     else:
+        roads_for_s7 = _filter_roads_to_final_corridors(
+            selected_roads,
+            final_corridors
+        )
+
+        if final_corridors is not None:
+            st.caption(
+                f"Sliding-window segmentation is using roads inside the final corridor layer: "
+                f"{len(roads_for_s7):,} of {len(selected_roads):,} selected road feature(s)."
+            )
+
+        if roads_for_s7 is None or roads_for_s7.empty:
+            st.warning(
+                "No roads intersect the final corridors. Review the dropped CorridorIDs or rebuild corridors before running segmentation."
+            )
+            return
+
         with st.expander("Analysis Settings", expanded=True):
 
             route_col_s7 = st.selectbox(
                 "Route name column",
-                options=list(selected_roads.columns),
-                index=list(selected_roads.columns).index("FULLNAME")
-                if "FULLNAME" in selected_roads.columns
+                options=list(roads_for_s7.columns),
+                index=list(roads_for_s7.columns).index("FULLNAME")
+                if "FULLNAME" in roads_for_s7.columns
                 else 0,
                 key="section7_route_col"
             )
@@ -1259,7 +1324,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
         ):
 
             results = run_sliding_window_risk_analysis(
-                roads=selected_roads,
+                roads=roads_for_s7,
                 crashes=crashes_s7,
                 route_col=route_col_s7,
                 segmentation_method=segmentation_method,
@@ -1280,7 +1345,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
             )
 
             original_density = _build_original_crash_density_layer(
-                selected_roads,
+                roads_for_s7,
                 crashes_s7,
                 segment_id_col_s7,
                 crash_snap_dist_ft
@@ -1535,10 +1600,10 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                 risk_segments=risk_segments_map,
                 risk_corridors=risk_corridors_map,
                 crashes=crashes_for_map,
-                roads=selected_roads,
+                roads=roads_for_s7,
                 roads_class=st.session_state.get("roads_class_display", None),
                 signals=st.session_state.get("signals_clean", None),
-                corridors=st.session_state.get("corridors", None),
+                corridors=final_corridors,
                 spatial_units=st.session_state.get("spatial_units_density_map", st.session_state.get("spatial_units", None)),
                 selected_layers=comparison_layers,
                 crash_density_symbology=current_density_symbology,
