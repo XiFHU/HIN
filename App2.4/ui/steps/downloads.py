@@ -202,6 +202,9 @@ def _apply_priority_display_controls(spatial_units_map, analysis_type):
     return out.drop(columns=["__priority_rank_value__"], errors="ignore"), f"Showing all {units_label}"
 
 
+
+
+
 def render_results_downloads(
     st_folium,
     workflow_context,
@@ -212,6 +215,7 @@ def render_results_downloads(
     kabco_result,
     analysis_type,
     density_cmap,
+    render_map=True,
 ):
     globals().update(workflow_context)
 
@@ -220,11 +224,14 @@ def render_results_downloads(
     roads_class_display = st.session_state.get("roads_class_display", None)
     signals_clean = st.session_state.get("signals_clean", None)
 
-    geojson_key = f"units_with_density_geojson_{analysis_type}"
+    render_scope = "map" if render_map else "table"
+    safe_analysis_type = str(analysis_type).replace(" ", "_").replace("/", "_")
+    geojson_key = f"units_with_density_geojson_{safe_analysis_type}_{render_scope}"
 
     header_col, menu_col = st.columns([0.82, 0.18])
     with header_col:
-        st.markdown(f"**{analysis_type} results**")
+        display_title = "Results" if str(analysis_type).strip().lower() == "final corridor map" else f"{analysis_type} results"
+        st.markdown(f"**{display_title}**")
     with menu_col:
         download_items = [
             {
@@ -232,14 +239,14 @@ def render_results_downloads(
                 "data": units_table.to_csv(index=False),
                 "file_name": "spatial_units.csv",
                 "mime": "text/csv",
-                "key": f"download_units_csv_{analysis_type}",
+                "key": f"download_units_csv_{safe_analysis_type}_{render_scope}",
             },
             {
                 "label": "Assigned Crashes CSV",
                 "data": assigned_table.to_csv(index=False),
                 "file_name": "assigned_crashes.csv",
                 "mime": "text/csv",
-                "key": f"download_assigned_csv_{analysis_type}",
+                "key": f"download_assigned_csv_{safe_analysis_type}_{render_scope}",
             },
             {
                 "kind": "prepare_geojson",
@@ -262,11 +269,17 @@ def render_results_downloads(
                     "data": kabco_result.to_csv(index=False),
                     "file_name": "crash_summary.csv",
                     "mime": "text/csv",
-                    "key": f"download_summary_{analysis_type}",
+                    "key": f"download_summary_{safe_analysis_type}_{render_scope}",
                 },
             )
 
         _download_menu("☰", download_items)
+
+    if not render_map:
+        st.caption(
+            "Result tables and downloads are ready. Open the Visualization section to choose and filter maps."
+        )
+        return
 
     display_col, layer_col = st.columns([0.34, 0.66])
 
@@ -371,9 +384,9 @@ def render_results_downloads(
 
     fmap = add_map_elements(fmap)
 
-    st_folium(
+    map_result = st_folium(
         fmap,
-        width=1200,
+        width="100%",
         height=900,
         key=(
             "crash_assignment_map_"

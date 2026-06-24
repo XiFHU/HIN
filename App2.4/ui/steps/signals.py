@@ -1,5 +1,7 @@
 """Step 2 OSM signal generation UI."""
 
+from modules.defaults import SIGNAL_DEFAULTS
+
 
 def render_signals_step(st_folium, workflow_context, spatial_unit=None):
     globals().update(workflow_context)
@@ -13,21 +15,44 @@ def render_signals_step(st_folium, workflow_context, spatial_unit=None):
 
     if selected_boundary is not None:
 
-        signal_distance = st.number_input(
-            "Duplicate signal distance (meters)",
-            min_value=10,
-            max_value=100,
-            value=45,
-            step=5
+        signal_distance = SIGNAL_DEFAULTS["duplicate_signal_distance_m"]
+        road_snap_distance = SIGNAL_DEFAULTS["road_snap_distance_ft"]
+
+        st.caption(
+            "Signals are required before building intersections or corridors. "
+            "Only the signal thresholds below are optional."
         )
 
-        road_snap_distance = st.number_input(
-            "Maximum distance from road (feet)",
-            min_value=25,
-            max_value=500,
-            value=300,
-            step=25
-        )
+        with st.expander("Signal threshold settings (optional)", expanded=False):
+            customize_signal_settings = st.checkbox(
+                "Customize signal thresholds",
+                value=False,
+                key="customize_signal_thresholds"
+            )
+
+            if customize_signal_settings:
+                signal_distance = st.number_input(
+                    "Duplicate signal distance (meters)",
+                    min_value=10,
+                    max_value=100,
+                    value=SIGNAL_DEFAULTS["duplicate_signal_distance_m"],
+                    step=5,
+                    key="signal_duplicate_distance_m"
+                )
+
+                road_snap_distance = st.number_input(
+                    "Maximum distance from road (feet)",
+                    min_value=25,
+                    max_value=500,
+                    value=SIGNAL_DEFAULTS["road_snap_distance_ft"],
+                    step=25,
+                    key="signal_road_snap_distance_ft"
+                )
+            else:
+                st.caption(
+                    f"Using defaults: duplicate distance {signal_distance} m; "
+                    f"road snap distance {road_snap_distance} ft."
+                )
 
         if st.button("Generate Signals"):
 

@@ -160,44 +160,8 @@ def render_results_step(st_folium, workflow_context, spatial_unit=None):
 
     spatial_units_map = add_density_to_spatial_units(spatial_units_map, np)
 
-    with st.expander("Optional minimum crash count filter", expanded=False):
-        st.caption(
-            "Use this optional filter to remove low-crash spatial units before mapping, "
-            "download, and comparison. Leave it off to keep every spatial unit, including "
-            "zero-crash units."
-        )
-        enable_min_crash_filter = st.checkbox(
-            "Exclude spatial units with fewer than a minimum number of crashes",
-            value=False,
-            key=f"results_enable_min_crash_filter_{analysis_type}",
-        )
-        min_crash_count = st.number_input(
-            "Minimum crash count",
-            min_value=0,
-            value=1,
-            step=1,
-            key=f"results_min_crash_count_{analysis_type}",
-            help=(
-                "Editable integer threshold. For example, 1 removes only zero-crash units; "
-                "3 keeps units with 3 or more crashes; any other non-negative value can be entered."
-            ),
-            disabled=not enable_min_crash_filter,
-        )
-
-    if enable_min_crash_filter and min_crash_count > 0:
-        before_filter_count = len(spatial_units_map)
-        spatial_units_map = spatial_units_map[
-            spatial_units_map["CrashCount"] >= int(min_crash_count)
-        ].copy()
-        st.info(
-            f"Minimum crash count filter applied: kept {len(spatial_units_map):,} of "
-            f"{before_filter_count:,} spatial units with CrashCount >= {int(min_crash_count)}."
-        )
-        if spatial_units_map.empty:
-            st.warning(
-                "The minimum crash count filter removed every spatial unit. "
-                "Lower the threshold or turn the filter off."
-            )
+    # Minimum crash-count filtering is handled only in the Visualization section.
+    # The saved crash-density result keeps all spatial units, including zero-crash units.
 
     # Keep the latest computed crash-density layer available for later maps
     # such as the Segment HIN comparison map. The raw spatial_units object
@@ -285,6 +249,10 @@ def render_results_step(st_folium, workflow_context, spatial_unit=None):
         settings=density_symbology_settings,
     )
 
+    st.session_state["latest_results_units_table"] = units_table
+    st.session_state["latest_results_assigned_table"] = assigned_table
+    st.session_state["latest_results_density_ready"] = True
+
     render_results_downloads(
         st_folium=st_folium,
         workflow_context=workflow_context,
@@ -295,4 +263,5 @@ def render_results_step(st_folium, workflow_context, spatial_unit=None):
         kabco_result=kabco_result,
         analysis_type=analysis_type,
         density_cmap=density_cmap,
+        render_map=False,
     )

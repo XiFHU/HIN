@@ -213,26 +213,19 @@ def render_classification_step(workflow_context, spatial_unit=None):
             st.warning("Select roads first.")
             return
 
-        final_corridors_for_segments = st.session_state.get(
-            "final_corridors",
-            st.session_state.get("corridors", None)
-        )
+        # Segment crash classification must use the full selected road network.
+        # Corridor context is optional for map display only. Filtering segments to
+        # final corridors hides valid road segments and makes segment/HIN results
+        # incomplete.
+        roads_for_segments = selected_roads.copy()
 
-        roads_for_segments = _filter_roads_to_final_corridors(
-            selected_roads,
-            final_corridors_for_segments
+        st.caption(
+            f"Road segment classification is using all selected road features: "
+            f"{len(roads_for_segments):,} road feature(s)."
         )
-
-        if final_corridors_for_segments is not None:
-            st.caption(
-                f"Road segment classification is using roads inside the final corridor layer: "
-                f"{len(roads_for_segments):,} of {len(selected_roads):,} selected road feature(s)."
-            )
 
         if roads_for_segments is None or roads_for_segments.empty:
-            st.warning(
-                "No roads intersect the final corridors. Review the dropped CorridorIDs or rebuild corridors before segment classification."
-            )
+            st.warning("No selected road segments are available for classification.")
             return
 
         if segment_unit_method == "Create equal-length segments":

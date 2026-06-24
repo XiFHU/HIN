@@ -7,6 +7,8 @@ from modules.roads import (
     fetch_osm_roads_for_place,
     suggest_osm_places,
 )
+from modules.io_utils import UPLOAD_READER_VERSION
+
 
 
 def _candidate_road_class_columns(gdf):
@@ -163,6 +165,8 @@ def _apply_road_network_filter(base_roads):
             ),
             key="road_class_layer_enabled"
         )
+        if enable_filter:
+            st.session_state["keep_data_setup_open"] = True
 
         class_cols = _candidate_road_class_columns(
             base_roads
@@ -432,6 +436,7 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
     if road_source == "Use TIGER roads + PLACE boundary":
 
         st.subheader("Upload TIGER files")
+        st.caption("Upload TIGER ZIP, GeoPackage, or GeoJSON files.")
 
         col1, col2 = st.columns(2)
 
@@ -461,17 +466,26 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
 
         if roads_file and places_file:
 
-            roads = load_vector(
-                roads_file
-            ).to_crs(
-                4326
-            )
+            try:
+                roads = load_vector(
+                    roads_file
+                ).to_crs(
+                    4326
+                )
 
-            places = load_vector(
-                places_file
-            ).to_crs(
-                4326
-            )
+                places = load_vector(
+                    places_file,
+                    prefer_place=True
+                ).to_crs(
+                    4326
+                )
+
+            except Exception as e:
+                st.error(
+                    "Unable to read one of the TIGER uploads. See the full error below."
+                )
+                st.exception(e)
+                st.stop()
 
             st.success(
                 "TIGER files loaded."
@@ -652,7 +666,8 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
 
             if not suggestions:
                 st.warning(
-                    "No OSM place suggestions were found. Try adding state/country, such as 'Centennial, Colorado, USA'."
+                    "No OSM place suggestions were found. You can still try the Download OSM roads button below using the exact text you entered. "
+                    "If it fails, try a simpler query such as 'Centennial, CO' or 'Centennial, Colorado'."
                 )
 
         suggestions = st.session_state.get(
@@ -887,6 +902,7 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
     else:
 
         st.subheader("Upload custom road network")
+        st.caption("Upload a zipped shapefile, shapefile components, GeoPackage, or GeoJSON.")
 
         st.info(
             "Upload shapefile components together "
@@ -894,9 +910,12 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
         )
 
         custom_road_files = st.file_uploader(
-            "Upload road shapefile ZIP or components",
+            "Upload road ZIP / components / GPKG / GeoJSON",
             type=[
                 "zip",
+                "gpkg",
+                "geojson",
+                "json",
                 "shp",
                 "dbf",
                 "shx",
@@ -915,12 +934,12 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                     custom_road_files
                 )
 
-            except Exception:
+            except Exception as e:
 
                 st.error(
-                    "Unable to read shapefile. "
-                    "Please upload .shp, .dbf, .shx, and .prj together."
+                    "Unable to read the road upload. See the full error below."
                 )
+                st.exception(e)
 
                 st.stop()
 
@@ -962,15 +981,11 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                 key="custom_segment_id_col"
             )
 
-            direction_method = st.radio(
-                "Route direction method for FromMile / ToMile",
-                [
-                    "Auto Detect",
-                    "East-West",
-                    "North-South"
-                ],
-                horizontal=True,
-                index=0
+            # Use automatic route ordering only. The previous East-West / North-South
+            # choices confused users and usually produced the same practical result.
+            direction_method = "Auto Detect"
+            st.caption(
+                "FromMile / ToMile will be generated automatically from route geometry."
             )
 
             if st.button(

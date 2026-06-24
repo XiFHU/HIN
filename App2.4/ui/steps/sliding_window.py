@@ -286,7 +286,6 @@ def _apply_hin_selection_controls(risk_segments_clean):
                 "Top X% of segments",
                 "Top X% of network miles",
                 "Capture at least X% of selected crash metric",
-                "Manual HIN Priority Index threshold",
             ],
             key="hin_display_selection_mode",
         )
@@ -294,7 +293,6 @@ def _apply_hin_selection_controls(risk_segments_clean):
         rank_by = None
         if mode not in [
             "All HIN segments",
-            "Manual HIN Priority Index threshold",
             "Capture at least X% of selected crash metric",
         ]:
             rank_by = st.selectbox(
@@ -349,24 +347,11 @@ def _apply_hin_selection_controls(risk_segments_clean):
                 )
             else:
                 st.warning("No crash-count or score columns are available for capture targeting.")
-        elif mode == "Manual HIN Priority Index threshold":
-            manual_threshold = st.number_input(
-                "Minimum HIN Priority Index",
-                min_value=0.0,
-                max_value=100.0,
-                value=80.0,
-                step=1.0,
-                key="hin_display_manual_index_threshold",
-            )
 
     out = _ensure_hin_priority_columns(risk_segments_clean).copy()
     if mode == "All HIN segments":
         return out, f"Showing all {len(out):,} HIN segments"
 
-    if mode == "Manual HIN Priority Index threshold":
-        values = pd.to_numeric(out.get("HIN_Priority_Index", 0), errors="coerce").fillna(0)
-        selected = out[values >= float(manual_threshold)].copy()
-        return selected, f"Showing {len(selected):,} segments with HIN Priority Index >= {float(manual_threshold):g}"
 
     # Most selection methods rank by HIN Priority Index unless the user chooses
     # another field. Capture targeting intentionally ranks by HIN Priority Index
@@ -1021,21 +1006,16 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
         st.warning("Please upload crash data first.")
 
     else:
-        roads_for_s7 = _filter_roads_to_final_corridors(
-            selected_roads,
-            final_corridors
+        # V18: run sliding-window analysis on all selected routes, not only the
+        # optional corridor context. Corridor layers are used only for map context.
+        roads_for_s7 = selected_roads.copy()
+        st.caption(
+            f"Sliding-window segmentation is using all selected road feature(s): {len(roads_for_s7):,}. "
+            "Corridor context, if built, is displayed only as a map layer."
         )
 
-        if final_corridors is not None:
-            st.caption(
-                f"Sliding-window segmentation is using roads inside the final corridor layer: "
-                f"{len(roads_for_s7):,} of {len(selected_roads):,} selected road feature(s)."
-            )
-
         if roads_for_s7 is None or roads_for_s7.empty:
-            st.warning(
-                "No roads intersect the final corridors. Review the dropped CorridorIDs or rebuild corridors before running segmentation."
-            )
+            st.warning("No selected roads are available for sliding-window segmentation.")
             return
 
         with st.expander("Analysis Settings", expanded=True):
@@ -1052,15 +1032,6 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
             segment_id_col_s7 = st.session_state.get(
                 "segment_id_col",
                 None
-            )
-
-            st.markdown("**Sliding-window method summary**")
-            st.info(
-                "This step ranks roads with a moving window. Uploaded or OSM road lines are used as "
-                "the route network. The sliding window has a fixed length and moves along each route "
-                "by the window increment. Each output segment receives the highest window score from "
-                "any sliding window that overlaps it. The output segment geometry can be based on the "
-                "original uploaded segments, a user-defined equal segment length, or the window increment."
             )
 
             segmentation_method = st.selectbox(
@@ -1088,7 +1059,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                     The app keeps the original uploaded/OSM road segment geometry as the final HIN output unit. Each original segment receives the highest overlapping window score. This is useful when you need results to match an existing GIS roadway layer, but segment lengths may vary and the map may be less comparable across routes.
 
                     **Score logic for all three methods**  
-                    The app first stores the raw maximum overlapping window value as **Max_Window_Score**. If the metric is Crash Count, that raw value is the maximum overlapping window crash count. If the metric is EPDO, that raw value is the maximum overlapping window EPDO total. The displayed **HIN Priority Index** is normalized to a 0–100 scale using: **HIN Priority Index = Max_Window_Score / max(Max_Window_Score) × 100**. This is a relative screening index, not a final adopted HIN designation. The top-percent threshold is then applied to the normalized HIN Priority Index.
+                    The app first stores the raw maximum overlapping window value as **Max_Window_Score**. If the metric is Crash Count, that raw value is the maximum overlapping window crash count. If the metric is EPDO, that raw value is the maximum overlapping window EPDO total. The displayed **HIN Priority Index** is normalized to a 0–100 scale using: **HIN Priority Index = Max_Window_Score / max(Max_Window_Score) × 100**. This is a relative screening index, not a final adopted HIN designation.
                     """
                 )
 
@@ -1123,42 +1094,19 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                     key="section7_segment_length",
                     help="Final HIN output segment length. Each segment receives the maximum score from any overlapping sliding window."
                 )
-                st.caption(
-                    "Final map segments use this equal-length value. The sliding window length and increment still control how window scores are calculated."
-                )
-
             elif segmentation_method == "Use window-increment segments":
                 segment_length = step_len
-                st.caption(
-                    "Final map segments equal the window increment. For example, a 0.50-mile window and 0.10-mile increment displays 0.10-mile HIN segments, each scored from overlapping 0.50-mile windows."
-                )
-
             else:
                 segment_length = step_len
-                st.caption(
-                    "Final map segments use the existing uploaded/OSM road geometry. Segment lengths may vary. The window increment controls only how far the sliding window moves between scores."
-                )
-
-            col4, col5 = st.columns(2)
-
-            with col4:
-                top_percent = st.slider(
-                    "Risk threshold (top %)",
-                    min_value=1,
-                    max_value=50,
-                    value=10,
-                    step=1,
-                    key="section7_top_percent"
-                )
-
-            with col5:
-                crash_snap_dist_ft = st.number_input(
-                    "Crash-to-route search distance (feet)",
-                    min_value=10.0,
-                    value=150.0,
-                    step=10.0,
-                    key="section7_crash_snap_dist_ft"
-                )
+            top_percent = 100
+            crash_snap_dist_ft = st.number_input(
+                "Crash-to-route search distance (feet)",
+                min_value=10.0,
+                value=150.0,
+                step=10.0,
+                key="section7_crash_snap_dist_ft",
+                help="Maximum distance used to snap crashes to the selected route network."
+            )
 
             risk_metric = st.radio(
                 "Scoring Metric",
@@ -1170,31 +1118,12 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                 key="section7_risk_metric"
             )
 
-            with st.expander("Optional minimum crash count filter", expanded=False):
-                st.caption(
-                    "Use this optional filter to remove low-crash HIN output segments before "
-                    "the final top-percent risky segment selection, map display, and downloads. "
-                    "Leave it off to keep every output segment, including zero-crash segments."
-                )
-                enable_min_crash_filter_s7 = st.checkbox(
-                    "Exclude HIN output segments with fewer than a minimum number of crashes",
-                    value=False,
-                    key="section7_enable_min_crash_filter",
-                )
-                min_crash_count_s7 = st.number_input(
-                    "Minimum crash count",
-                    min_value=0,
-                    value=1,
-                    step=1,
-                    key="section7_min_crash_count",
-                    help=(
-                        "Editable integer threshold. For example, 1 removes only zero-crash segments; "
-                        "3 keeps segments with 3 or more crashes; any other non-negative value can be entered."
-                    ),
-                    disabled=not enable_min_crash_filter_s7,
-                )
+            # Minimum crash filtering is now a Visualization-only display filter.
+            # The saved Sliding Window output keeps all generated HIN segments.
+            enable_min_crash_filter_s7 = False
+            min_crash_count_s7 = 0
 
-            with st.expander("Metric definitions", expanded=True):
+            with st.expander("Metric definitions", expanded=False):
                 st.markdown(
                     """
                     **How the HIN Priority Index is calculated**
@@ -1203,7 +1132,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                     2. A fixed-length sliding window moves along each route.
                     3. Each window receives a score.
                     4. Each short output segment receives the highest score from the windows that overlap it.
-                    5. Segments at or above the selected top-percent threshold are flagged as risky.
+                    5. The Visualization section lets users display top X, top X%, or top X% of network miles.
 
                     **Crash Count vs. EPDO**
 
@@ -1211,9 +1140,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                     - **EPDO** is a severity-weighted crash score. Each crash is converted to a weighted value using the K/A/B/C/O weights below, then the weights are summed in each sliding window.
                     - **Max_Window_Score** is the raw maximum score from the windows that overlap each output segment. If the selected metric is Crash Count, this is the maximum overlapping window crash count. If the selected metric is EPDO, this is the maximum overlapping window EPDO total.
                     - **HIN Priority Index** is the normalized 0–100 screening index assigned to each output segment: **HIN Priority Index = Max_Window_Score / max(Max_Window_Score) × 100**. For EPDO analysis, this is equivalent to **Max overlapping window EPDO / max(Max overlapping window EPDO) × 100**. The highest-scoring segment becomes 100, and other segments are scaled relative to it. This index supports HIN screening and comparison; it is not the final adopted HIN designation by itself.
-                    - **Optional minimum crash count filter** removes output segments with fewer than the entered number of crashes before the final top-percent risky segment selection. For example, a value of 1 removes zero-crash segments, while a value of 4 keeps only segments with 4 or more crashes.
-
-                    Density metrics are not used in the sliding-window selector because fixed-length windows make density and count-based maps nearly identical. Use the final comparison map to compare HIN risk against the original crash-density layer.
+                    Density metrics are not used in the sliding-window selector because fixed-length windows make density and count-based maps nearly identical. Use the Visualization section to compare HIN risk against crash density.
                     """
                 )
 
@@ -1337,11 +1264,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                 kabco_col=kabco_col,
                 epdo_weights=epdo_weights,
                 segment_id_col=segment_id_col_s7,
-                min_crash_count=(
-                    int(min_crash_count_s7)
-                    if enable_min_crash_filter_s7
-                    else None
-                )
+                min_crash_count=None
             )
 
             original_density = _build_original_crash_density_layer(
@@ -1367,26 +1290,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
             )
             risk_corridors = results["risk_corridors"]
             route_lines = results["route_lines"]
-            risk_threshold = results["risk_threshold"]
 
-            st.info(
-                f"Risk threshold value: {risk_threshold:.3f}"
-            )
-
-            applied_min_crash_filter = st.session_state.get(
-                "section7_enable_min_crash_filter",
-                False
-            )
-            applied_min_crash_count = st.session_state.get(
-                "section7_min_crash_count",
-                1
-            )
-            if applied_min_crash_filter:
-                st.info(
-                    f"Minimum crash count filter applied: HIN output segments with "
-                    f"Crash_Count < {int(applied_min_crash_count)} were removed before "
-                    "the final risky segment selection and map display."
-                )
 
             risk_segments_clean = section7_clean_risk_segments(
                 risk_segments,
@@ -1413,6 +1317,8 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                     "Max_Window_Score",
                     ascending=False
                 )
+            if "Rank" not in seg_table.columns:
+                seg_table.insert(0, "Rank", range(1, len(seg_table) + 1))
 
             corridor_table = (
                 risk_corridors_clean
@@ -1443,7 +1349,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                         data=df_to_csv_bytes(
                             seg_table
                         ),
-                        file_name="section7_risk_segments.csv",
+                        file_name="hin_risk_segments.csv",
                         mime="text/csv",
                         key="section7_download_segments_csv"
                     )
@@ -1453,32 +1359,37 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                         data=gdf_to_geojson_bytes(
                             risk_segments_clean
                         ),
-                        file_name="section7_sliding_window_risk_segments.geojson",
+                        file_name="hin_risk_segments.geojson",
                         mime="application/geo+json",
                         key="section7_download_segments_geojson"
                     )
 
                     st.download_button(
-                        "Section 7 Excel",
+                        "HIN Results Excel",
                         data=section7_excel_bytes(
                             risk_windows,
                             risk_segments_clean,
                             risk_corridors_clean
                         ),
-                        file_name="section7_sliding_window_results.xlsx",
+                        file_name="hin_sliding_window_results.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="section7_download_excel"
                     )
 
                     st.download_button(
-                        "Risk Corridors CSV",
+                        "HIN Corridors CSV",
                         data=df_to_csv_bytes(
                             corridor_table
                         ),
-                        file_name="section7_risk_corridors.csv",
+                        file_name="hin_corridors.csv",
                         mime="text/csv",
                         key="section7_download_corridors_csv"
                     )
+
+            if st.session_state.get("defer_sliding_window_maps", False):
+                st.session_state["section7_visualization_ready"] = True
+                st.success("HIN results are ready. Open Visualization to display the HIN Priority Index map.")
+                return
 
             # -----------------------------
             # Final Segment Comparison Map

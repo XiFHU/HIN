@@ -1,5 +1,7 @@
 """Step 3 corridor building UI."""
 
+from modules.defaults import CORRIDOR_DEFAULTS
+
 
 def render_corridors_step(st_folium, workflow_context, spatial_unit=None):
     globals().update(workflow_context)
@@ -189,41 +191,66 @@ def render_corridors_step(st_folium, workflow_context, spatial_unit=None):
 
         else:
 
-            min_signals_for_corridor = st.number_input(
-                "Minimum signals required to create a corridor",
-                min_value=1,
-                max_value=20,
-                value=3,
-                step=1
-            )
+            min_signals_for_corridor = CORRIDOR_DEFAULTS["min_signals_for_corridor"]
+            nearest_road_distance_m = CORRIDOR_DEFAULTS["nearest_road_distance_m"]
+            corridor_width_m = CORRIDOR_DEFAULTS["corridor_width_m"]
+            corridor_search_buffer_m = CORRIDOR_DEFAULTS["corridor_search_buffer_m"]
 
-            nearest_road_distance_m = st.number_input(
-                "Maximum signal distance from named road, meters",
-                min_value=10,
-                max_value=300,
-                value=100,
-                step=10
-            )
-
-            corridor_width_m = st.number_input(
-                "Corridor width, meters",
-                min_value=5,
-                max_value=100,
-                value=20,
-                step=5
-            )
-
-            corridor_search_buffer_m = st.number_input(
-                "Fallback road search buffer around signals, meters",
-                min_value=25,
-                max_value=500,
-                value=200,
-                step=25,
-                help=(
-                    "Used only when the route name cannot be found in the corridor road layer. "
-                    "Signal-to-road matching uses the setting above."
+            with st.expander("Optional corridor settings", expanded=False):
+                customize_corridor_settings = st.checkbox(
+                    "Customize corridor thresholds",
+                    value=False,
+                    key="customize_corridor_thresholds"
                 )
-            )
+
+                if customize_corridor_settings:
+                    min_signals_for_corridor = st.number_input(
+                        "Minimum signals required to create a corridor",
+                        min_value=1,
+                        max_value=20,
+                        value=CORRIDOR_DEFAULTS["min_signals_for_corridor"],
+                        step=1,
+                        key="corridor_min_signals_optional"
+                    )
+
+                    nearest_road_distance_m = st.number_input(
+                        "Maximum signal distance from named road, meters",
+                        min_value=10,
+                        max_value=300,
+                        value=CORRIDOR_DEFAULTS["nearest_road_distance_m"],
+                        step=10,
+                        key="corridor_nearest_road_distance_optional"
+                    )
+
+                    corridor_width_m = st.number_input(
+                        "Corridor width, meters",
+                        min_value=5,
+                        max_value=100,
+                        value=CORRIDOR_DEFAULTS["corridor_width_m"],
+                        step=5,
+                        key="corridor_width_optional"
+                    )
+
+                    corridor_search_buffer_m = st.number_input(
+                        "Fallback road search buffer around signals, meters",
+                        min_value=25,
+                        max_value=500,
+                        value=CORRIDOR_DEFAULTS["corridor_search_buffer_m"],
+                        step=25,
+                        key="corridor_search_buffer_optional",
+                        help=(
+                            "Used only when the route name cannot be found in the corridor road layer. "
+                            "Signal-to-road matching uses the setting above."
+                        )
+                    )
+                else:
+                    st.caption(
+                        "Using defaults: "
+                        f"min signals {min_signals_for_corridor}; "
+                        f"road match {nearest_road_distance_m} m; "
+                        f"corridor width {corridor_width_m} m; "
+                        f"fallback buffer {corridor_search_buffer_m} m."
+                    )
 
             if st.button(
                 "Build Corridors",
@@ -543,8 +570,6 @@ def render_corridors_step(st_folium, workflow_context, spatial_unit=None):
                     ),
                     width="stretch"
                 )
-
-        st.subheader("Final Corridor Map")
 
         try:
 

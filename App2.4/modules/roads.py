@@ -362,6 +362,43 @@ def _osm_route_name(row):
     return "OSM unnamed road"
 
 
+def _osm_query_candidates(place_query):
+    """Return simple fallback OSM/Nominatim query variants.
+
+    Nominatim can be sensitive to punctuation and country wording. This keeps
+    the UI simple while trying the same city in a few common forms.
+    """
+    raw = " ".join(str(place_query or "").replace("\n", " ").split()).strip()
+    if not raw:
+        return []
+
+    candidates = []
+
+    def add(value):
+        value = " ".join(str(value or "").split()).strip(" ,")
+        if value and value.lower() not in [c.lower() for c in candidates]:
+            candidates.append(value)
+
+    add(raw)
+
+    # Common cleanup variants.
+    cleaned = raw.replace(", USA", "").replace(", U.S.A.", "").replace(", United States", "")
+    add(cleaned)
+
+    # Expand/contract Colorado for local use cases without changing other states.
+    add(cleaned.replace(", CO", ", Colorado"))
+    add(cleaned.replace(", Colorado", ", CO"))
+
+    if "colorado" in cleaned.lower() or cleaned.lower().endswith(", co"):
+        city = cleaned.split(",")[0].strip()
+        if city:
+            add(f"{city}, Arapahoe County, Colorado, USA")
+            add(f"{city}, Colorado, United States")
+            add(f"City of {city}, Colorado, USA")
+
+    return candidates
+
+
 def fetch_osm_roads_for_place(place_query, network_type="drive"):
     """Download OSM roads for a geocoded place name using OSMnx.
 
@@ -383,74 +420,85 @@ def fetch_osm_roads_for_place(place_query, network_type="drive"):
             "Install the requirements.txt package list and try again."
         ) from exc
 
-    query = str(place_query).strip()
+    errors = []
 
-    boundary = ox.geocode_to_gdf(query).to_crs(4326)
+    for query in _osm_query_candidates(place_query):
+        try:
+            boundary = ox.geocode_to_gdf(query).to_crs(4326)
 
-    if boundary.empty:
-        raise ValueError(f"No OSM/Nominatim boundary was found for: {query}")
+            if boundary.empty:
+                errors.append(f"{query}: no boundary returned")
+                continue
 
-    boundary_geom = _safe_union(boundary.geometry)
+            boundary_geom = _safe_union(boundary.geometry)
 
-    graph = ox.graph_from_polygon(
-        boundary_geom,
-        network_type=network_type,
-        simplify=True,
-        retain_all=False,
-        truncate_by_edge=True,
+            graph = ox.graph_from_polygon(
+                boundary_geom,
+                network_type=network_type,
+                simplify=True,
+                retain_all=False,
+                truncate_by_edge=True,
+            )
+
+            roads = ox.graph_to_gdfs(
+                graph,
+                nodes=False,
+                fill_edge_geometry=True,
+            ).reset_index()
+
+            if roads.empty:
+                errors.append(f"{query}: no roads returned")
+                continue
+
+            roads = roads.to_crs(4326)
+            roads = roads[roads.geometry.notna()].copy()
+            roads = roads[~roads.geometry.is_empty].copy()
+            roads = roads[
+                roads.geometry.geom_type.isin(["LineString", "MultiLineString"])
+            ].copy()
+
+            if roads.empty:
+                errors.append(f"{query}: no usable road geometries")
+                continue
+
+            roads["OSMHighway"] = roads["highway"].apply(normalize_osm_highway_value)
+            roads["OSMEdgeID"] = [f"OSM_EDGE_{i + 1}" for i in range(len(roads))]
+            roads["RouteNameOSM"] = roads.apply(_osm_route_name, axis=1)
+            roads["RoadType"] = roads["OSMHighway"].fillna("Unknown")
+
+            try:
+                boundary_for_clip = boundary[["geometry"]].copy()
+                if boundary_for_clip.crs != roads.crs:
+                    boundary_for_clip = boundary_for_clip.to_crs(roads.crs)
+                boundary_geom = _safe_union(boundary_for_clip.geometry)
+                roads = roads[roads.intersects(boundary_geom)].copy()
+            except Exception:
+                pass
+
+            if roads.empty:
+                errors.append(f"{query}: roads were empty after clipping")
+                continue
+
+            return roads.reset_index(drop=True), boundary
+
+        except Exception as exc:
+            errors.append(f"{query}: {exc}")
+
+    detail = " | ".join(errors[-3:]) if errors else "No OSM/Nominatim boundary was found."
+    raise ValueError(
+        "Unable to download OSM roads for the study area. Tried query variants. "
+        + detail
     )
-
-    roads = ox.graph_to_gdfs(
-        graph,
-        nodes=False,
-        fill_edge_geometry=True,
-    ).reset_index()
-
-    if roads.empty:
-        raise ValueError(f"No OSM roads were found for: {query}")
-
-    roads = roads.to_crs(4326)
-    roads = roads[roads.geometry.notna()].copy()
-    roads = roads[~roads.geometry.is_empty].copy()
-    roads = roads[
-        roads.geometry.geom_type.isin(["LineString", "MultiLineString"])
-    ].copy()
-
-    if roads.empty:
-        raise ValueError(f"No usable OSM road geometries were found for: {query}")
-
-    roads["OSMHighway"] = roads["highway"].apply(normalize_osm_highway_value)
-    roads["OSMEdgeID"] = [f"OSM_EDGE_{i + 1}" for i in range(len(roads))]
-    roads["RouteNameOSM"] = roads.apply(_osm_route_name, axis=1)
-    roads["RoadType"] = roads["OSMHighway"].fillna("Unknown")
-
-    # Keep only edges that intersect the geocoded study area. The network call
-    # may include short outside edges when truncate_by_edge=True.
-    try:
-        boundary_for_clip = boundary[["geometry"]].copy()
-        if boundary_for_clip.crs != roads.crs:
-            boundary_for_clip = boundary_for_clip.to_crs(roads.crs)
-        boundary_geom = _safe_union(boundary_for_clip.geometry)
-        roads = roads[roads.intersects(boundary_geom)].copy()
-    except Exception:
-        pass
-
-    return roads.reset_index(drop=True), boundary
-
 
 
 def suggest_osm_places(place_query, limit=8):
     """Return candidate OSM/Nominatim place matches for a user-entered query.
 
     This is used only for UI suggestions before downloading roads. It does not
-    download the road network.
+    download the road network. If the first query returns nothing, the function
+    tries a few simple variants such as removing USA or expanding CO/Colorado.
     """
     if place_query is None or not str(place_query).strip():
-        return []
-
-    query = str(place_query).strip()
-
-    if len(query) < 3:
         return []
 
     try:
@@ -459,54 +507,60 @@ def suggest_osm_places(place_query, limit=8):
         return []
 
     url = "https://nominatim.openstreetmap.org/search"
-    params = {
-        "q": query,
-        "format": "jsonv2",
-        "addressdetails": 1,
-        "limit": int(limit),
-    }
     headers = {
         "User-Agent": "Corridor-HIN-Streamlit-App/1.0"
     }
 
-    try:
-        response = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=20,
-        )
-        response.raise_for_status()
-        data = response.json()
-    except Exception:
-        return []
-
     suggestions = []
     seen = set()
 
-    for item in data:
-        display_name = str(item.get("display_name", "")).strip()
-        if not display_name:
+    for query in _osm_query_candidates(place_query):
+        params = {
+            "q": query,
+            "format": "jsonv2",
+            "addressdetails": 1,
+            "limit": int(limit),
+        }
+
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=20,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception:
             continue
 
-        key = display_name.lower()
-        if key in seen:
-            continue
-        seen.add(key)
+        for item in data:
+            display_name = str(item.get("display_name", "")).strip()
+            if not display_name:
+                continue
 
-        suggestions.append(
-            {
-                "display_name": display_name,
-                "osm_type": item.get("osm_type", ""),
-                "osm_id": item.get("osm_id", ""),
-                "class": item.get("class", ""),
-                "type": item.get("type", ""),
-                "lat": item.get("lat", ""),
-                "lon": item.get("lon", ""),
-            }
-        )
+            key = display_name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
 
-    return suggestions
+            suggestions.append(
+                {
+                    "display_name": display_name,
+                    "osm_type": item.get("osm_type", ""),
+                    "osm_id": item.get("osm_id", ""),
+                    "class": item.get("class", ""),
+                    "type": item.get("type", ""),
+                    "lat": item.get("lat", ""),
+                    "lon": item.get("lon", ""),
+                }
+            )
+
+        if len(suggestions) >= int(limit):
+            break
+
+    return suggestions[:int(limit)]
+
 
 def apply_osm_highway_mapping(roads_gdf, highway_mapping):
     """Apply an OSM highway-to-functional-class mapping to roads."""
