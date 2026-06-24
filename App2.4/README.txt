@@ -35,9 +35,6 @@ Common packages used by the app include:
 - python-docx
 - kaleido for PNG/JPG chart export
 
-If PNG export does not work, install Kaleido:
-
-pip install kaleido
 
 
 Folder Structure
@@ -175,7 +172,7 @@ Segment Workflow
 
 The app uses road segments as the spatial units.
 
-In V20+ and current version, segment crash classification and Sliding Window/HIN analysis use all selected road segments, not only roads inside final corridors.
+In current version, segment crash classification and Sliding Window/HIN analysis use all selected road segments, not only roads inside final corridors.
 
 This prevents losing segment-level results outside corridor context.
 
@@ -278,18 +275,6 @@ Dashboard maps can include optional context layers:
 - Study boundary
 
 Dashboard map views are read-only. Editing and filtering should be done in the main workflow and Visualization section.
-
-Map Auto-Zoom
--------------
-
-Current versions improve dashboard map zoom behavior:
-
-- Dashboard maps reset when result bounds change.
-- Crash-density maps try to auto-fit to the selected result layer.
-- HIN maps try to auto-fit to the selected result layer.
-- Corridor maps auto-fit to corridor geometry.
-
-If a map still opens at the wrong scale, refresh the Streamlit page after the result layer is available.
 
 
 Step 5: Dashboard, Downloads, and Reports
@@ -495,13 +480,6 @@ as the y-axis ID or spatial unit identifier.
 Known Limitations
 -----------------
 
-Direct click-to-delete corridors from the map
----------------------------------------------
-
-The stable app uses ID-based corridor deletion.
-
-Directly clicking a corridor on a Folium map and deleting it would require custom JavaScript callbacks. That is possible, but less stable in regular Streamlit/Folium.
-
 Static map export
 -----------------
 
@@ -581,25 +559,6 @@ Make sure the ZIP contains at least:
 .prj
 
 If possible, use GeoPackage .gpkg, which is more reliable than shapefile ZIP.
-
-Dashboard map opens at world scale
-----------------------------------
-
-Try refreshing after results are ready. The map should auto-fit after the result layer is available.
-
-Also confirm the result layer has a valid CRS and geometry.
-
-PNG export does not work
-------------------------
-
-Install Kaleido:
-
-pip install kaleido
-
-Streamlit table gives a PyArrow error
--------------------------------------
-
-This can happen when a column has mixed object types. The app includes sanitization logic for display tables, but if the issue appears again, convert mixed columns to strings before calling st.dataframe().
 
 
 Suggested Future Improvements
