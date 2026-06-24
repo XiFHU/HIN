@@ -14,35 +14,6 @@ The app is organized around three spatial-unit workflows:
 
 The app is designed so normal users can run the workflow with default settings, while advanced threshold controls are hidden inside optional settings panels.
 
-
-Recommended Run Command
------------------------
-
-Always run the app from inside the App folder. This avoids Python importing old ui or modules folders from another location.
-
-cd /d "C:\Users\XiWei\Downloads\App-UI-REFRESH-SIMPLIFIED-V23-REPORT-MAP-TABLE-RESET-FIXES\App"
-python -m streamlit run app2.4.py
-
-If you extracted the ZIP somewhere else, change the path before \App.
-
-Avoid running only with a full file path like this:
-
-streamlit run "C:\path\to\App\app2.4.py"
-
-That can sometimes cause Streamlit/Python to import modules from an older folder.
-
-
-Important README Rule
----------------------
-
-This project should keep only one main README file:
-
-README.txt
-
-Do not create or keep a separate README file for every update version.
-
-For future updates, update this README.txt directly instead of creating files such as READ_ME_V11..., READ_ME_V12..., READ_ME_V23..., and so on.
-
 Main Dependencies
 -----------------
 
@@ -75,7 +46,7 @@ Folder Structure
 The app is organized as a modular Streamlit project:
 
 App/
-├── app2.4.py
+├── app2.10.py
 ├── requirements.txt
 ├── modules/
 │   ├── io_utils.py
@@ -556,29 +527,6 @@ corridor
 segment
 
 
-Current Change Summary
-------------------
-
-The current app package includes these key fixes:
-
-- Only one dashboard scrollbar.
-- Road-class chart only appears when the Step 1 Road Class Filter is enabled.
-- Road-class chart uses the exact road-class column selected in Step 1.
-- Crash-density and HIN dashboard maps reset their map keys when bounds change.
-- Dashboard maps should auto-fit to the selected result layer.
-- Map fit_bounds uses padding and selected result layer bounds.
-- Avoids unrelated fields such as traffic-signal highway attributes for the road-class chart.
-- Add Clear history / Start over button near the workflow selector.
-- Remove manual bounding-box summary.
-- Remove polygon and rectangle drawing tools from result maps.
-- Fix TIGER/dashboard map errors related to missing or unexpected GeoJSON coordinates.
-- Improve Word report maps so selected crash-density and HIN result layers appear above roads/signals.
-- Add requested table context fields:
-  - Intersections: Road 1 and Road 2
-  - Corridors: Route name
-  - Segments: Route name.
-
-
 Recommended User Workflow
 -------------------------
 
@@ -620,18 +568,7 @@ Segment / HIN Analysis
 8. Export dashboard/report.
 
 
-Troubleshooting
----------------
 
-The app imports old files or shows an old UI
---------------------------------------------
-
-Run from inside the current App folder:
-
-cd /d "C:\path\to\current\App"
-python -m streamlit run app2.4.py
-
-Do not run from an old extracted folder.
 
 Shapefile ZIP upload fails
 --------------------------
