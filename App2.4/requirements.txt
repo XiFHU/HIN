@@ -17,3 +17,4 @@ xyzservices
 authlib
 python-docx
 kaleido
+plotly
