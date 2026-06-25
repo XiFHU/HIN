@@ -126,8 +126,6 @@ def _render_sliding_window_visualization(st_folium, workflow_context):
         st.warning("No HIN segments remain after the map filter. Lower the minimum crash count.")
         return
 
-    _render_area_selection_summary(risk_segments_clean, "viz_hin_area")
-
     with f2:
         risk_segments_map, hin_selection_summary = sliding_window_ui._apply_hin_selection_controls(risk_segments_clean)
     st.caption(hin_selection_summary)

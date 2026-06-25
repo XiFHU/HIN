@@ -1,80 +1,132 @@
 HIN Corridor / Intersection / Segment Safety Analysis App
 =========================================================
 
+
 Overview
 --------
+This Streamlit app supports roadway safety screening for intersections, corridors, and road segments. It combines crash data, road networks, traffic signals, corridor generation, crash-density analysis, Sliding Window / HIN priority scoring, visualization maps, dashboard charts, and Word/PNG report export.
 
-This Streamlit app supports roadway safety screening using crash data, road networks, traffic signals, corridors, intersections, road segments, crash density, HIN priority scoring, and dashboard/report outputs.
+The app is designed for two types of users:
 
-The app is organized around three spatial-unit workflows:
+1. Regular users who want to run the workflow with default settings.
+2. Advanced users who want to adjust optional thresholds, map filters, dashboard selections, and report outputs.
 
-1. Intersection — builds signalized intersection units from traffic signals and analyzes crash concentration around intersections.
-2. Corridor — builds corridors from signalized routes and analyzes corridor-level crash density.
-3. Segment — analyzes road segments and supports Sliding Window / HIN priority analysis across all selected road segments.
+Most technical thresholds are hidden in optional settings panels so the main workflow stays simple.
 
-The app is designed so normal users can run the workflow with default settings, while advanced threshold controls are hidden inside optional settings panels.
+Main things the app can do
+--------------------------
+The app can:
 
-Main Dependencies
------------------
+- Load crash data from CSV or similar tabular files.
+- Load custom road networks from shapefile ZIPs, shapefile components, GeoPackage, or GeoJSON.
+- Use TIGER roads with a PLACE boundary.
+- Use OSM roads without requiring a road upload.
+- Load, fetch, clean, and de-duplicate traffic signal data from OSM.
+- Build signalized intersection spatial units.
+- Build signalized corridors from signals and road routes.
+- Use road segments as spatial units.
+- Generate FromMile and ToMile values automatically.
+- Join crashes to intersections, corridors, or road segments.
+- Calculate crash count and crash density.
+- Run Sliding Window / HIN priority analysis for segment workflows.
+- Display crash-density maps and HIN priority maps.
+- Filter maps by minimum crash count, top N, top percent, or top percent of length/miles.
+- Show dashboard crash patterns, severity patterns, route/segment rankings, and HIN summaries.
+- Normalize severity fields from KABCO-style data or FARS-style/person-count data.
+- Export CSV, Excel, GeoJSON, PNG summaries, and Word reports.
+- Create dashboard reports with selected charts, tables, and map layers.
+- Clear history / start over from the workflow page.
 
+Recommended run command
+-----------------------
+Always run the app from inside the App folder. This avoids Python importing older ui or modules folders from another extracted version.
+
+Example:
+
+cd /d "C:\path\to\App"
+python -m streamlit run app.py
+
+If your folder name is different, change the path before \App.
+
+Avoid running only with a full file path such as:
+
+streamlit run "C:\path\to\App\app.py"
+
+That can sometimes make Python import old modules from another folder.
+
+Dependencies
+------------
 Install dependencies from requirements.txt:
 
 pip install -r requirements.txt
 
-Common packages used by the app include:
+Important packages include:
 
 - streamlit
-- geopandas
 - pandas
+- geopandas
 - numpy
 - shapely
 - folium
 - streamlit-folium
 - plotly
-- openpyxl
+- kaleido
 - python-docx
-- kaleido for PNG/JPG chart export
+- openpyxl
+- pyproj
+- fiona or pyogrio, depending on the environment
 
+If Streamlit Cloud reports that Plotly is missing, make sure requirements.txt includes:
 
+plotly
 
-Folder Structure
-----------------
+If PNG chart export does not work, install or add:
 
-The app is organized as a modular Streamlit project:
+kaleido
+
+Recommended folder structure
+----------------------------
+The app should look generally like this:
 
 App/
-├── app2.10.py
-├── requirements.txt
-├── modules/
-│   ├── io_utils.py
-│   ├── defaults.py
-│   ├── corridors.py
-│   ├── signals.py
-│   ├── visualization.py
-│   └── ...
-├── ui/
-│   ├── workflows.py
-│   ├── workflow_shared.py
-│   ├── intersection.py
-│   ├── corridor.py
-│   ├── segment.py
-│   └── steps/
-│       ├── roads.py
-│       ├── signals.py
-│       ├── corridors.py
-│       ├── crashes.py
-│       ├── results.py
-│       ├── sliding_window.py
-│       ├── visualization.py
-│       ├── downloads.py
-│       └── dashboard.py
-└── README.txt
+  app2.4.py
+  requirements.txt
+  README.txt
+  modules/
+    io_utils.py
+    defaults.py
+    corridors.py
+    signals.py
+    visualization.py
+    ...
+  ui/
+    workflows.py
+    workflow_shared.py
+    intersection.py
+    corridor.py
+    segment.py
+    steps/
+      roads.py
+      signals.py
+      corridors.py
+      crashes.py
+      results.py
+      sliding_window.py
+      visualization.py
+      downloads.py
+      dashboard.py
 
+Keep only one README.txt in the App folder.
 
-Workflow Summary
+Workflow options
 ----------------
+The app has three main workflow modes:
 
-The app uses a simplified five-step workflow:
+1. Intersection
+2. Corridor
+3. Segment
+
+Each workflow uses the same general structure:
 
 1. Road Network / Data Setup
 2. Build Spatial Units
@@ -82,25 +134,15 @@ The app uses a simplified five-step workflow:
 4. Visualization
 5. Dashboard / Downloads / Report
 
-Most technical thresholds use default values automatically. Users only need to open optional settings if they want to customize them.
-
-
-Step 1: Road Network / Data Setup
----------------------------------
-
-Supported Road Sources
-----------------------
-
+Step 1 - Road Network / Data Setup
+----------------------------------
 The app supports three road-source options:
 
 1. Upload custom road network
-2. Use TIGER roads + PLACE boundary
-3. Use OSM roads — no upload
+2. Use TIGER roads plus PLACE boundary
+3. Use OSM roads with no road upload
 
-Supported Upload Formats
-------------------------
-
-Custom road uploads can include:
+Supported custom road uploads include:
 
 - Zipped shapefile: .zip
 - Shapefile components uploaded together: .shp, .shx, .dbf, .prj, optional .cpg
@@ -114,115 +156,240 @@ roads.shx
 roads.dbf
 roads.prj
 
-The ZIP loader is designed to read shapefile ZIPs safely from memory and avoid Windows temp-folder permission errors.
+The upload loader is designed to avoid common Windows temp-folder permission errors when reading shapefile ZIPs.
 
-Road Class Filter
+Road class filter
 -----------------
-
 The Road Class Filter is optional.
 
-When enabled, the user selects a road classification field from the uploaded or downloaded road network. The dashboard road-class chart only appears when this filter is enabled.
+When enabled, the user selects the road-class field from the road network. The dashboard road-class charts only appear when this filter is enabled and the selected field is available in the analysis data.
 
-The road-class chart uses the exact column selected in Step 1. It does not use unrelated fields such as traffic-signal attributes.
+Possible road-class fields include:
 
-Potential road-class fields may include:
-
-- TIGER-style fields such as road type / MTFCC / RTTYP, depending on the dataset
-- OSM-style fields such as highway
-- Uploaded-road fields such as FunctionalClass, RoadClass, CLASS, or similar
+- OSM: highway
+- TIGER: MTFCC, RTTYP, road type, or similar fields depending on the source
+- Uploaded roads: FunctionalClass, RoadClass, CLASS, FC, or similar local fields
 
 
-Step 2: Build Spatial Units
----------------------------
+Crash data
+----------
+Crash data can come from local CSV files or other supported table formats. The app expects crash records to have location information or geometry that can be spatially joined to road/intersection/corridor units.
 
-Spatial units depend on the selected workflow.
+The app tries to detect co
+mmon crash-related columns, including:
 
-Intersection Workflow
+- Crash ID or case ID
+- Crash date
+- Crash year
+- Crash month
+- Crash type / collision manner
+- KABCO or severity
+- Fatalities
+- Serious injuries
+- Level A injuries
+- Level B injuries
+- Level C injuries
+- Uninjured / no injury / PDO
+
+FARS-style data support
+-----------------------
+The app includes logic for FARS-style datasets.
+
+For example, if a FARS file has fields like:
+
+- year
+- monthname
+- man_collname
+- fatals
+- fatalities
+- Level A Injuries
+- Level B Injuries
+- Level C Injuries
+- Uninjured
+
+then the app should try to normalize these into the dashboard logic.
+
+Crash type detection should recognize columns that contain values such as:
+
+- Rear End
+- Front-to-Front
+- Front-to-Rear
+- Angle
+- Sideswipe
+- Other
+- Broadside
+- Head On
+- Approach Turn
+
+For FARS, man_collname is a likely crash-type field.
+
+Severity and KABCO normalization
+--------------------------------
+The dashboard can use either a KABCO field or separate person-count fields.
+
+KABCO meaning:
+
+K = Fatal injury
+A = Suspected serious injury / incapacitating injury
+B = Suspected minor injury / non-incapacitating injury
+C = Possible injury / complaint of injury
+O = Property damage only / no injury / uninjured
+
+The app attempts to normalize fields like:
+
+- Fatalities -> K person count
+- Level A Injuries / Serious Injuries -> A person count
+- Level B Injuries / Non-incapacitating Injuries -> B person count
+- Level C Injuries / Possible Injuries -> C person count
+- Uninjured / No Injury / PDO -> O person count
+
+Crash-level KPI logic
 ---------------------
+The top dashboard KPI cards are intended to show:
 
-The app generates signalized intersection units from traffic signal points.
+- Total crashes
+- Fatal crashes
+- Fatalities
+- Serious injury crashes
+- Serious injuries
 
-Typical process:
+Important difference:
 
-1. Load or fetch signal points.
+- Fatalities means number of people killed.
+- Fatal crashes means number of unique crashes with at least one fatality.
+- Serious injuries means number of people seriously injured.
+- Serious injury crashes means number of unique crashes with at least one serious injury.
+
+For example, a dataset may have 19 fatalities but only 15 fatal crashes if some crashes involved more than one fatality.
+
+The app should count fatal crashes using the unique crash ID / case ID when available, not by summing fatalities.
+
+Step 2 - Build Spatial Units
+----------------------------
+Spatial units depend on the workflow.
+
+Intersection workflow
+---------------------
+The Intersection workflow builds signalized intersection units.
+
+The general method is:
+
+1. Load or fetch traffic signals.
 2. Remove duplicate signals using a default duplicate-distance threshold.
-3. Build signalized intersection buffers or polygons.
-4. Prepare intersection units for crash joining and crash-density analysis.
+3. Use signal locations and nearby roads to define signalized intersections.
+4. Create intersection spatial units.
+5. Join crashes to those units.
+6. Calculate crash count and crash density.
 
-Signals are required to build intersection units. Only the threshold settings are optional.
+Signals are required for intersection creation. Only the thresholds are optional.
 
-Corridor Workflow
+Intersection output tables should include fields such as:
+
+- Rank
+- Spatial unit ID
+- Road 1
+- Road 2
+- Crash count
+- Crash density
+- KABCO/severity fields when available
+
+Corridor workflow
 -----------------
+The Corridor workflow builds corridors from signalized routes.
 
-The app builds corridors from signals and roads.
-
-Typical process:
+The general method is:
 
 1. Generate or load signals.
 2. Assign signals to nearby roads.
-3. Group valid signalized routes into corridors.
-4. Build corridor geometries.
-5. Optionally drop corridors by ID.
+3. Group signals by route or road name.
+4. Build corridor geometries for valid signalized routes.
+5. Allow corridors to be dropped by ID.
 6. Store both all generated corridors and filtered/final corridors.
+7. Join crashes to corridors.
+8. Calculate corridor crash count and crash density.
 
-Signals are required to build corridors. Corridor thresholds are optional.
+Corridor output tables should include fields such as:
 
-Segment Workflow
+- Rank
+- Corridor ID
+- Route name
+- Route total length
+- Corridor length
+- Crash count
+- Crash density
+- KABCO/severity fields when available
+
+Segment workflow
 ----------------
+The Segment workflow uses road segments as spatial units.
 
-The app uses road segments as the spatial units.
+The app should use all selected road segments for segment crash classification and HIN analysis, not only roads inside final corridors.
 
-In current version, segment crash classification and Sliding Window/HIN analysis use all selected road segments, not only roads inside final corridors.
+Segment output tables should include fields such as:
 
-This prevents losing segment-level results outside corridor context.
+- Rank
+- Segment ID
+- Route name
+- Route total length
+- Segment length
+- From mile
+- To mile
+- Crash count
+- Crash density
+- HIN index when available
 
+FromMile / ToMile generation
+----------------------------
+The app automatically generates FromMile and ToMile values for roads and segments. Earlier manual direction options were removed to keep the workflow simpler.
 
-Step 3: Analysis
-----------------
-
-Crash Density Analysis
+Step 3 - Analysis
+-----------------
+Crash density analysis
 ----------------------
+Crash density is the main analysis result for intersections, corridors, and segments.
 
-Crash density is the main result for intersection, corridor, and segment workflows.
-
-The general concept is:
+General concept:
 
 Crash Density = Crash Count / Exposure Unit
 
-For intersections, the exposure unit is typically the intersection spatial unit. For corridors and segments, the exposure unit is typically length in miles.
+For intersections, the exposure unit is typically the intersection spatial unit.
 
-Crash-density results are considered analysis results. Therefore:
+For corridors and segments, the exposure unit is typically length in miles.
 
-- Intersection results are ready after crash-density analysis.
-- Corridor results are ready after crash-density analysis.
-- Segment results are ready after crash-density analysis.
-- Sliding Window/HIN results are additional segment-priority results.
+Results are considered ready after crash-density analysis for:
 
-Sliding Window / HIN Analysis
+- Intersection
+- Corridor
+- Segment
+
+Sliding Window / HIN analysis
 -----------------------------
+Sliding Window / HIN analysis is mainly used in the Segment workflow.
 
-Sliding Window analysis is mainly for the Segment workflow.
+The method creates moving windows along routes, counts crashes in each window, and calculates a HIN priority index.
 
-The app generates moving windows along routes and calculates HIN priority values. In the latest versions, Sliding Window analysis is designed to use all selected road segments rather than only corridor roads.
+The HIN table should show one row per high-risk segment/window and include:
 
-The Sliding Window step keeps key settings visible because those settings define the method:
+- Rank
+- SegID or window ID
+- Segment/window length
+- From mile
+- To mile
+- Route
+- Route total length
+- HIN index
 
-- Window length
-- Step size
-- HIN / risk metric
-- Ranking or priority method
+If the HIN result is based on sliding windows, the From mile and To mile fields should describe the window mile range, not a separate route mile range.
 
-Less important thresholds are hidden or moved to Visualization.
+Route From mile and Route To mile are not needed in the HIN table.
 
+Step 4 - Visualization
+----------------------
+The Visualization section displays result maps.
 
-Step 4: Visualization
----------------------
+Visualization filters are display-only. They should not overwrite the saved result data.
 
-The Visualization section displays result maps without overwriting the analysis tables.
-
-Visualization filters are display-only. They do not change the saved result data.
-
-Common filters include:
+Common map filters include:
 
 - Minimum crash count
 - Show all features
@@ -232,39 +399,29 @@ Common filters include:
 
 Crash Density Map
 -----------------
-
 The Crash Density Map shows spatial units colored by crash density.
 
-It uses the same general color meaning throughout the workflow and dashboard:
+Color meaning:
 
-Green  = lower value
+Green = low value
 Yellow = moderate value
 Orange = high value
-Red    = highest value
-
-Crash Density Threshold / Summary Map
--------------------------------------
-
-This is a screening view based on the same crash-density result. It can show units above average, above median, or other summary thresholds.
-
-It does not create a new analysis result; it only summarizes or filters the existing crash-density result.
+Red = highest value
 
 HIN Priority Map
 ----------------
+The HIN Priority Map shows HIN segments/windows by HIN priority index.
 
-The HIN Priority Map shows segments or windows by HIN priority index.
+Color meaning:
 
-It uses the same low-to-high color meaning:
-
-Green  = lower priority
+Green = lower priority
 Yellow = moderate priority
 Orange = high priority
-Red    = highest priority
+Red = highest priority
 
-Dashboard Map Layers
+Dashboard map layers
 --------------------
-
-Dashboard maps can include optional context layers:
+Dashboard maps are read-only and can include optional context layers, such as:
 
 - Roads
 - Road class layer
@@ -274,283 +431,301 @@ Dashboard maps can include optional context layers:
 - Generated corridors
 - Study boundary
 
-Dashboard map views are read-only. Editing and filtering should be done in the main workflow and Visualization section.
+The layer control should stay compact or collapsed so it does not cover the map.
 
+Signals should only appear in exported report maps when the Signals layer is selected.
 
-Step 5: Dashboard, Downloads, and Reports
+Manual bounding-box and polygon selection
 -----------------------------------------
+The manual bounding-box summary and polygon drawing tools have been removed from the stable workflow.
 
-Crash Insights Dashboard
-------------------------
+Step 5 - Dashboard, Downloads, and Reports
+------------------------------------------
+The dashboard is organized around two major groups:
 
-The Crash Insights dashboard is the main results dashboard.
+1. Crash patterns
+2. Risk patterns / spatial-unit ranking
 
-It includes default safety-analysis figures such as:
+Crash summary KPI cards
+-----------------------
+At the top of Crash Insights, the app shows KPI cards such as:
 
-- Crashes by year
+- Total crashes
+- Fatal crashes
+- Fatalities
+- Serious injury crashes
+- Serious injuries
+
+These KPI cards should also be available in Dashboard Builder and included in the Word report when selected.
+
+Crash pattern charts
+--------------------
+Crash Insights can include:
+
+- Crashes by year stacked by KABCO
 - Crash type pie/donut chart
-- KABCO / severity distribution
-- Road-class chart when the Step 1 road-class filter is enabled
+- Monthly crash trend by year
+- Travel mode severity bubble chart
+- Road class by KABCO heatmap when road class filter is enabled
+- Crash type by KABCO heatmap
+- Crash type and KABCO treemap
+
+Crashes by year stacked by KABCO
+--------------------------------
+This chart should use:
+
+- X-axis: year
+- Y-axis: crash count
+- Color/stack: KABCO or normalized severity
+
+K, A, B, C, and O should use distinct colors.
+
+Hover tooltip should show the count for each severity in each year.
+
+Crash type pie/donut chart
+--------------------------
+This chart shows the share of crashes by crash type.
+
+The app should auto-detect crash type fields when possible. For FARS, man_collname is a likely crash type field.
+
+Monthly crash trend by year
+---------------------------
+This chart should use:
+
+- X-axis: Jan, Feb, Mar, Apr, May, Jun, Jul, Aug, Sep, Oct, Nov, Dec
+- Y-axis: crash count
+- One colored line per year
+
+If there is no explicit month field, the app should try to extract month from a crash date field.
+
+Travel mode severity bubble chart
+---------------------------------
+This chart summarizes pedestrian, bicycle, motorcycle, and motor-vehicle-related crashes by severity.
+
+A recommended layout is:
+
+- X-axis: K, A, B, C, O
+- Y-axis: travel mode
+- Bubble size: crash count
+- Color: travel mode
+
+
+Crash type by KABCO heatmap
+---------------------------
+This chart helps show which crash types are associated with more severe outcomes.
+
+Recommended layout:
+
+- Rows: crash type
+- Columns: K, A, B, C, O
+- Color: crash count
+
+Road class by KABCO heatmap
+---------------------------
+This chart appears only when the Road Class Filter is enabled and the road-class field is available.
+
+Recommended layout:
+
+- Rows: road class
+- Columns: K, A, B, C, O
+- Color: crash count
+
+Crash type and KABCO treemap
+----------------------------
+This chart can show hierarchical crash composition, such as:
+
+Crash type -> KABCO severity
+
+It is useful when there are many crash types.
+
+Risk pattern charts and tables
+------------------------------
+Risk Insights can include:
+
 - Top spatial units by crash density
 - Top spatial units by crash count
-- HIN priority ranking when HIN results are available
+- HIN priority table
+- High Injury Network summary
+- Crash Density Map
+- HIN Priority Map
 
-The manual Chart Builder tab was removed in V19. The workflow is now closer to a fixed safety dashboard:
+Top spatial units by crash density
+----------------------------------
+This chart should be sorted highest to lowest.
 
-1. Crash Insights displays the main figures.
-2. Dashboard Builder lets users choose which charts/maps to include in the final dashboard/report.
-3. Dashboard Assistant can help create chart/report requests using natural language.
+Recommended axis setup:
 
-Dashboard Builder
------------------
+- Y-axis: spatial unit ID
+- X-axis: crash density
 
-The Dashboard Builder lets users select specific charts, tables, and maps to include in the dashboard export/report.
+Tooltip should include available context such as:
 
-Typical selectable items include:
+- Spatial unit ID
+- Route name
+- From mile
+- To mile
+- Segment/window length
+- Crash count
+- Crash density
 
-- Crashes by year
-- Crash type share
-- KABCO distribution
-- Road-class summary when available
-- Top crash-density spatial units
-- Top crash-count spatial units
-- HIN priority ranking
-- Crash density map
-- HIN priority map
-- Corridor map
+Top spatial units by crash count
+--------------------------------
+This chart should be sorted highest to lowest.
 
-Dashboard Assistant
--------------------
+Recommended axis setup:
 
-The Dashboard Assistant is a simple natural-language helper.
+- Y-axis: spatial unit ID
+- X-axis: crash count
 
-Examples:
+Tooltip should include route and milepost context when available.
 
-Show KABCO distribution.
+HIN priority table
+------------------
+The HIN priority result should use a table instead of a confusing stacked bar chart.
 
-Create a dashboard with crash year trend, crash type chart, top risky units, and crash density map.
+Recommended columns:
 
-Count crashes in each intersection colored by crash type.
+- Rank
+- SegID
+- Seg/window length
+- From mile
+- To mile
+- Route
+- Route total length
+- HIN index
 
-The assistant uses rule-based and fuzzy matching logic. It does not require model training.
+For intersections, extra context columns can include:
 
-If the assistant cannot confidently match a user request to a column, it should ask the user to choose the exact column from the dataset.
+- Road 1
+- Road 2
 
+For corridors and segments, extra context columns can include:
 
-Downloads
----------
+- Route name
+- Route total length
+- Spatial unit length
 
-The app supports result downloads such as:
+High Injury Network summary
+---------------------------
+The HIN summary shows how much of the network and how many crashes are captured by the selected high-risk network threshold.
 
-- CSV result tables
-- Excel result tables
-- GeoJSON / GIS outputs when available
-- Word report
-- PNG dashboard summary
+Users can select thresholds such as:
 
-For corridor workflows, downloads should distinguish between:
+- Top 20 segments/windows
+- Top 10 percent of miles
+- Top 5 percent of miles
+- HIN index >= 75
+- HIN index >= 50
+
+The green arrow on the HIN summary cards does not mean a time trend. It means the selected HIN share of analyzed miles or assigned crashes.
+
+For example:
+
+High-risk miles: 2.00 mi
+Green arrow: 1.6 percent of analyzed miles
+
+This means the selected high-risk network represents 1.6 percent of the analyzed road mileage.
+
+Downloads and exports
+---------------------
+The app supports:
+
+- CSV result downloads
+- Excel result downloads
+- GeoJSON/GIS result downloads when available
+- Word report export
+- PNG dashboard summary export
+
+Corridor downloads should distinguish between:
 
 1. All generated corridors
 2. Filtered/final corridors after dropped corridors are removed
 
-For segment and HIN workflows, downloads should avoid names like section7 and instead use clear names such as:
-
-hin_risk_segments.csv
-hin_sliding_window_results.xlsx
-hin_corridors.csv
-
-
-Table Context Fields
---------------------
-
-Result tables should include useful context fields when available.
-
-Intersection tables should include:
-
-- Spatial unit id
-- Unit type
-- City
-- Crash count
-- Crash density
-- Road 1
-- Road 2
-
-Corridor tables should include:
-
-- Corridor ID
-- Route name
-- City
-- Length
-- Crash count
-- Crash density
-
-Segment tables should include:
-
-- Segment ID
-- Route name
-- City
-- Length
-- Crash count
-- Crash density
-- HIN priority index, when HIN results exist
-
-
-Word Report Export
+Word report export
 ------------------
-
 The Word report is intended to include:
 
-- Narrative summary text
-- Key charts
-- Clean result tables
-- Selected dashboard map images
+- Report generation time using the selected report time zone
+- Crash summary KPI numbers
+- Selected charts
+- Selected tables
+- Selected map images
 
-The report should focus on decision-ready outputs, not raw uploaded tables.
+The report should focus on decision-ready outputs, not raw uploaded crash tables.
 
-Recommended report tables include:
+Report maps
+-----------
+Report maps should include selected result layers, such as:
 
-Top crash-density spatial units
--------------------------------
+- Crash density layer
+- HIN priority layer
 
-Recommended columns:
+Context layers should only appear if selected in Dashboard Builder, such as:
 
-Rank
-Spatial unit id
-Unit type
-City
-Length_mi
-Crash count
-Crash density
+- Roads
+- Signals
+- Corridors
+- Study boundary
 
-Severity summary by spatial unit
---------------------------------
+Signals should not be forced into report maps, because green signal points can be confused with green low-risk crash-density features.
 
-Recommended columns:
+For dense segment maps, report map segment line width should be thin enough to see the network clearly.
 
-Rank
-Spatial unit id
-K
-A
-B
-C
-O
-Total
+Dashboard Assistant
+-------------------
+The Dashboard Assistant is a rule-based natural-language helper.
 
-Top HIN / risk spatial units
-----------------------------
+It does not require model training.
 
-Recommended columns:
+It should understand requests such as:
 
-Rank
-Spatial unit id
-HIN priority index
-Crash count
+- Show crash type share as a pie chart.
+- KABCO count by year stacked chart.
+- Line chart crash count by year.
+- Monthly crash trend.
+- Crash type by KABCO heatmap.
+- Top 10 segments by crash density.
+- Create a dashboard with crash year trend, crash type chart, top risky units, and crash density map.
 
-The report should avoid using length, density, or score fields as the spatial unit ID.
+If it cannot confidently match a requested variable to a dataset column, it should ask the user to select the exact column.
 
-
-Clear History / Start Over
+Clear history / start over
 --------------------------
-
 The app includes a Clear history / Start over button near the workflow selector.
 
-This button should clear Streamlit session state and restart the workflow so users can begin a new analysis without old results, old map settings, or old dashboard selections interfering.
+This should clear session state so the user can restart without old analysis results, maps, or uploads interfering with the new run.
 
-
-Important Notes About Spatial Unit IDs
---------------------------------------
-
-Spatial unit ranking charts and report tables should use meaningful spatial-unit IDs.
-
-Examples:
-
-INT_93
-COR_12
-SEGROW_4382
-
-They should not use fields like:
-
-SegmentLength_Mile
-CrashDensity
-HIN_Priority_Index
-
-as the y-axis ID or spatial unit identifier.
-
-
-Known Limitations
+Known limitations
 -----------------
+Direct click-to-delete corridors from the map
+---------------------------------------------
+The stable app uses ID-based corridor deletion.
+
+Directly clicking a corridor on a Folium map and deleting it would require custom JavaScript callbacks. That is possible but less stable in regular Streamlit/Folium.
 
 Static map export
 -----------------
+Static map images in Word reports are generated from selected layers. They may not exactly match the interactive Folium map because web basemap tiles and matplotlib/static rendering behave differently.
 
-Static map images in Word reports are generated from selected map layers. Some web-map basemap tiles may not export exactly like the interactive map depending on local rendering and package support.
+Dashboard Assistant
+-------------------
+The assistant uses rules, aliases, and fuzzy matching. It is not a trained language model.
 
-Natural-language dashboard assistant
-------------------------------------
+This is usually enough because the app domain is limited to known roadway safety terms such as crash type, crash year, KABCO, severity, crash density, HIN, road class, intersection, corridor, segment, route, and milepost.
 
-The assistant uses rule-based and fuzzy matching logic. It is not a trained model.
+Troubleshooting
+---------------
+The app imports old files or shows an old UI
+--------------------------------------------
+Run from inside the current App folder:
 
-This is usually better for this app because the expected domain terms are known:
+cd /d "C:\path\to\current\App"
+python -m streamlit run app2.4.py
 
-crash type
-crash year
-KABCO
-severity
-crash count
-crash density
-HIN
-road class
-intersection
-corridor
-segment
-
-
-Recommended User Workflow
--------------------------
-
-Intersection Analysis
----------------------
-
-1. Choose Intersection.
-2. Load roads, boundary, crashes, and signals.
-3. Generate signals/intersections.
-4. Run crash-density analysis.
-5. View Crash Density Map.
-6. Open Dashboard.
-7. Review crash year, crash type, KABCO, crash-density ranking, and maps.
-8. Export Word report or PNG summary.
-
-Corridor Analysis
------------------
-
-1. Choose Corridor.
-2. Load roads, boundary, crashes, and signals.
-3. Generate signals.
-4. Build corridors.
-5. Optionally drop corridors by ID.
-6. Run crash-density analysis.
-7. View final corridor and crash-density maps.
-8. Export all generated corridors and filtered/final corridors.
-9. Export dashboard/report.
-
-Segment / HIN Analysis
-----------------------
-
-1. Choose Segment.
-2. Load roads and crashes.
-3. Run segment crash-density analysis using all selected road segments.
-4. Run Sliding Window / HIN analysis.
-5. View Crash Density Map and HIN Priority Map.
-6. Open Dashboard.
-7. Review crash-density ranking, crash-count ranking, and HIN priority ranking.
-8. Export dashboard/report.
-
-
-
+Do not run from an old extracted folder.
 
 Shapefile ZIP upload fails
 --------------------------
-
 Make sure the ZIP contains at least:
 
 .shp
@@ -558,18 +733,38 @@ Make sure the ZIP contains at least:
 .dbf
 .prj
 
-If possible, use GeoPackage .gpkg, which is more reliable than shapefile ZIP.
+If possible, use GeoPackage .gpkg, which is often more reliable than shapefile ZIP.
 
+Streamlit Cloud says Plotly is missing
+--------------------------------------
+Add this to requirements.txt:
 
-Suggested Future Improvements
+plotly
+
+Then redeploy the app.
+
+PNG export does not work
+------------------------
+Install or add:
+
+kaleido
+
+Dashboard table gives a PyArrow error
+-------------------------------------
+This can happen when a column contains mixed object types. The app includes display sanitization, but if the error appears again, convert mixed columns to strings before displaying them with st.dataframe().
+
+Map opens at world scale
+------------------------
+Refresh after the result layer is available. Also confirm the layer has valid geometry and CRS.
+
+Suggested future improvements
 -----------------------------
+Possible future improvements include:
 
-Potential future versions could add:
-
-- More stable map-to-report screenshot capture.
-- Better direct map selection for corridors or spatial units.
-- Click chart bar to highlight map feature.
-- More advanced dashboard assistant intent parsing.
+- More stable map screenshot capture from the exact interactive Folium view.
+- Click chart bar to highlight a feature on the map.
+- Direct map-based corridor deletion.
 - Saved dashboard templates.
 - User-defined report templates.
-- Export full dashboard to standalone HTML with embedded maps and charts.
+- More advanced Dashboard Assistant intent parsing.
+- Standalone HTML dashboard export with embedded charts and maps.
