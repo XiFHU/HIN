@@ -630,8 +630,8 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
         st.subheader("Use OSM roads without upload")
 
         st.info(
-            "Enter a study area place name. The app will download OSM drive-network roads "
-            "for that boundary and then apply the OSM highway classification mapping."
+            "Enter a city or study area name, then click Find matching OSM places. "
+            "Choose the correct city/county/state/country from the dropdown before downloading roads."
         )
 
         pending_place_query = st.session_state.pop(
@@ -649,7 +649,7 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                 "osm_place_query",
                 st.session_state.get("area_name", "")
             ),
-            placeholder="Example: Fort Collins, Colorado, USA",
+            placeholder="Example: Aurora, CO, USA or Paris, France",
             key="osm_place_query_input"
         )
 
@@ -667,7 +667,11 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
             if not suggestions:
                 st.warning(
                     "No OSM place suggestions were found. You can still try the Download OSM roads button below using the exact text you entered. "
-                    "If it fails, try a simpler query such as 'Centennial, CO' or 'Centennial, Colorado'."
+                    "If it fails, try a more complete query such as 'City, State/Province, Country'."
+                )
+            else:
+                st.success(
+                    f"Found {len(suggestions)} possible OSM places. Choose the correct one from the dropdown below."
                 )
 
         suggestions = st.session_state.get(
@@ -675,26 +679,48 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
             []
         )
 
-        if suggestions:
-            suggestion_labels = [
-                item.get("display_name", "")
-                for item in suggestions
-                if item.get("display_name", "")
-            ]
+        selected_place_for_download = place_query
 
-            if suggestion_labels:
-                selected_place = st.selectbox(
-                    "Select a suggested OSM place",
-                    suggestion_labels,
-                    key="osm_selected_place_suggestion"
+        if suggestions:
+            suggestion_options = []
+            option_to_display_name = {}
+
+            for idx, item in enumerate(suggestions):
+                display_name = item.get("display_name", "")
+                if not display_name:
+                    continue
+
+                label = item.get("label", display_name)
+                option = f"{idx + 1}. {label}"
+                suggestion_options.append(option)
+                option_to_display_name[option] = display_name
+
+            if suggestion_options:
+                selected_option = st.selectbox(
+                    "Select the correct OSM place",
+                    suggestion_options,
+                    key="osm_selected_place_suggestion",
+                    help=(
+                        "For city-only searches, choose the matching city/county/state/country. "
+                        "The selected dropdown value will be used when downloading OSM roads."
+                    )
+                )
+
+                selected_place_for_download = option_to_display_name.get(
+                    selected_option,
+                    place_query
+                )
+
+                st.caption(
+                    f"Selected for download: {selected_place_for_download}"
                 )
 
                 if st.button(
                     "Use selected place name",
                     key="use_selected_osm_place"
                 ):
-                    st.session_state["osm_place_query"] = selected_place
-                    st.session_state["osm_place_query_pending"] = selected_place
+                    st.session_state["osm_place_query"] = selected_place_for_download
+                    st.session_state["osm_place_query_pending"] = selected_place_for_download
                     st.session_state.pop(
                         "osm_place_suggestions",
                         None
@@ -722,14 +748,14 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
 
             try:
                 roads, selected_boundary = fetch_osm_roads_for_place(
-                    place_query,
+                    selected_place_for_download,
                     network_type=network_type
                 )
 
                 st.session_state["osm_raw_roads"] = roads
                 st.session_state["selected_boundary"] = selected_boundary
-                st.session_state["area_name"] = str(place_query).strip()
-                st.session_state["osm_place_query"] = str(place_query).strip()
+                st.session_state["area_name"] = str(selected_place_for_download).strip()
+                st.session_state["osm_place_query"] = str(selected_place_for_download).strip()
 
                 for k in [
                     "base_roads",

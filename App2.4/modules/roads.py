@@ -363,38 +363,51 @@ def _osm_route_name(row):
 
 
 def _osm_query_candidates(place_query):
-    """Return simple fallback OSM/Nominatim query variants.
+    """Return generic OSM/Nominatim query variants without assuming a state.
 
-    Nominatim can be sensitive to punctuation and country wording. This keeps
-    the UI simple while trying the same city in a few common forms.
+    This app is not Colorado-only.  For a short city-only input such as
+    "Aurora", the app should search globally and return a list of possible
+    places for the user to choose from.  The function therefore only normalizes
+    the user's text and tries safe variants; it never appends a state, county,
+    or country that the user did not provide.
     """
     raw = " ".join(str(place_query or "").replace("\n", " ").split()).strip()
     if not raw:
         return []
 
     candidates = []
+    seen = set()
 
     def add(value):
         value = " ".join(str(value or "").split()).strip(" ,")
-        if value and value.lower() not in [c.lower() for c in candidates]:
+        key = value.lower()
+        if value and key not in seen:
             candidates.append(value)
+            seen.add(key)
 
     add(raw)
+    add(raw.title())
 
-    # Common cleanup variants.
-    cleaned = raw.replace(", USA", "").replace(", U.S.A.", "").replace(", United States", "")
+    # Country-word cleanup/expansion based only on text already entered.
+    cleaned = raw
+    for suffix in [
+        ", USA", ", U.S.A.", ", United States",
+        ", usa", ", u.s.a.", ", united states",
+    ]:
+        cleaned = cleaned.replace(suffix, "")
+    cleaned = cleaned.strip(" ,")
     add(cleaned)
+    add(cleaned.title())
 
-    # Expand/contract Colorado for local use cases without changing other states.
-    add(cleaned.replace(", CO", ", Colorado"))
-    add(cleaned.replace(", Colorado", ", CO"))
+    add(raw.replace(", US", ", United States"))
+    add(raw.replace(", U.S.", ", United States"))
+    add(raw.replace(", UK", ", United Kingdom"))
+    add(raw.replace(", UAE", ", United Arab Emirates"))
 
-    if "colorado" in cleaned.lower() or cleaned.lower().endswith(", co"):
-        city = cleaned.split(",")[0].strip()
-        if city:
-            add(f"{city}, Arapahoe County, Colorado, USA")
-            add(f"{city}, Colorado, United States")
-            add(f"City of {city}, Colorado, USA")
+    # Generic city wording can help Nominatim, but still does not force a state.
+    if "," not in cleaned:
+        add(f"City of {cleaned}")
+        add(f"City of {cleaned.title()}")
 
     return candidates
 
@@ -491,12 +504,77 @@ def fetch_osm_roads_for_place(place_query, network_type="drive"):
     )
 
 
+def _osm_suggestion_search_requests(place_query, limit=8):
+    """Build generic Nominatim suggestion requests.
+
+    For city-only inputs, Nominatim's structured ``city=`` search is often
+    better than a plain q search.  This keeps the previous choose-from-dropdown
+    behavior while staying global.
+    """
+    raw = " ".join(str(place_query or "").replace("\n", " ").split()).strip()
+    if not raw:
+        return []
+
+    requests_out = []
+    seen = set()
+
+    def add(params):
+        params = dict(params)
+        params.update({
+            "format": "jsonv2",
+            "addressdetails": 1,
+            "extratags": 1,
+            "namedetails": 1,
+            "dedupe": 1,
+            "limit": int(limit),
+        })
+        key = tuple(sorted((k, str(v)) for k, v in params.items()))
+        if key not in seen:
+            requests_out.append(params)
+            seen.add(key)
+
+    for query in _osm_query_candidates(raw):
+        add({"q": query})
+
+    # Structured search for short city-only input.  Do not add a state/country.
+    if "," not in raw:
+        add({"city": raw})
+        add({"city": raw.title()})
+
+    return requests_out
+
+
+def _format_osm_suggestion_label(item):
+    """Create a compact city / county / state / country dropdown label."""
+    display_name = str(item.get("display_name", "")).strip()
+    address = item.get("address") or {}
+
+    city = (
+        address.get("city")
+        or address.get("town")
+        or address.get("village")
+        or address.get("municipality")
+        or address.get("hamlet")
+        or item.get("name")
+        or ""
+    )
+    county = address.get("county") or address.get("state_district") or ""
+    state = address.get("state") or address.get("province") or address.get("region") or ""
+    country = address.get("country") or ""
+
+    parts = [p for p in [city, county, state, country] if p]
+    compact = ", ".join(parts)
+    if compact and display_name and compact.lower() not in display_name.lower():
+        return f"{compact} — {display_name}"
+    return compact or display_name
+
+
 def suggest_osm_places(place_query, limit=8):
     """Return candidate OSM/Nominatim place matches for a user-entered query.
 
-    This is used only for UI suggestions before downloading roads. It does not
-    download the road network. If the first query returns nothing, the function
-    tries a few simple variants such as removing USA or expanding CO/Colorado.
+    Users can type only a city name, then choose the intended city/county/state
+    or country from a dropdown.  The search is global and does not assume a
+    default state or country.
     """
     if place_query is None or not str(place_query).strip():
         return []
@@ -514,14 +592,7 @@ def suggest_osm_places(place_query, limit=8):
     suggestions = []
     seen = set()
 
-    for query in _osm_query_candidates(place_query):
-        params = {
-            "q": query,
-            "format": "jsonv2",
-            "addressdetails": 1,
-            "limit": int(limit),
-        }
-
+    for params in _osm_suggestion_search_requests(place_query, limit=limit):
         try:
             response = requests.get(
                 url,
@@ -539,14 +610,20 @@ def suggest_osm_places(place_query, limit=8):
             if not display_name:
                 continue
 
-            key = display_name.lower()
+            key = (
+                str(item.get("osm_type", "")),
+                str(item.get("osm_id", "")),
+                display_name.lower(),
+            )
             if key in seen:
                 continue
             seen.add(key)
 
+            label = _format_osm_suggestion_label(item)
             suggestions.append(
                 {
                     "display_name": display_name,
+                    "label": label or display_name,
                     "osm_type": item.get("osm_type", ""),
                     "osm_id": item.get("osm_id", ""),
                     "class": item.get("class", ""),

@@ -6,6 +6,10 @@ from modules.fars import (
     detect_county_fips_from_boundary,
     parse_fars_accident_csv,
 )
+from modules.crash_field_mapping import (
+    render_field_mapping_ui,
+    apply_field_mapping,
+)
 from ..map_symbology import (
     categorical_color_lookup,
     render_crash_color_controls,
@@ -228,8 +232,24 @@ def _render_crash_filters(crashes, source_key="crash"):
     return crashes
 
 
+def _render_data_size_and_quality_notes():
+    with st.expander("App limits and data quality notes", expanded=False):
+        st.markdown(
+            """
+- **OSM signal accuracy:** OSM signal points are volunteered/contributed data. Signal locations, missing signals, and duplicate signal nodes can affect intersection/corridor building.
+- **OSM road classes:** OSM `highway` classes are useful for screening but may not match agency functional classification.
+- **TIGER roads:** TIGER is broad national road geometry. It is useful for coverage, but road class/detail and geometry can be less precise than local agency centerlines.
+- **Uploaded crash/FARS fields:** Different agencies use different column names. Use the Crash Field Mapping panel to confirm crash ID, date/year, crash type, severity, and injury-count fields.
+- **Large datasets:** For Streamlit Cloud, keep uploads and map layers moderate. Very large OSM extracts, statewide roads, or hundreds of thousands of crashes may need pre-filtering, road-class filtering, or local workstation processing.
+- **Map performance:** Interactive Folium maps can slow down when many thousands of features are drawn. Use Top N / Top percent filters for display when needed.
+            """
+        )
+
+
 def render_crashes_step(st_folium, workflow_context, spatial_unit=None):
     globals().update(workflow_context)
+
+    _render_data_size_and_quality_notes()
 
     selected_roads = st.session_state.get("selected_roads", None)
     roads_class_display = st.session_state.get("roads_class_display", None)
@@ -289,6 +309,16 @@ def render_crashes_step(st_folium, workflow_context, spatial_unit=None):
                     crash_df
                 ).to_crs(
                     4326
+                )
+
+                mapping = render_field_mapping_ui(
+                    st,
+                    crashes_loaded,
+                    key_prefix="upload_crash_field_mapping"
+                )
+                crashes_loaded = apply_field_mapping(
+                    crashes_loaded,
+                    mapping
                 )
 
                 st.markdown(
@@ -578,6 +608,16 @@ def render_crashes_step(st_folium, workflow_context, spatial_unit=None):
                     fars_csv_upload,
                     county_code=county_code if str(county_code).strip() else None,
                 ).to_crs(4326)
+
+                mapping = render_field_mapping_ui(
+                    st,
+                    crashes_loaded,
+                    key_prefix="fars_crash_field_mapping"
+                )
+                crashes_loaded = apply_field_mapping(
+                    crashes_loaded,
+                    mapping
+                )
 
                 crashes_loaded = _clip_crashes_to_boundary(
                     crashes_loaded,

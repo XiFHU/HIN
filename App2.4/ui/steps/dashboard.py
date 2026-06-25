@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 
 import pandas as pd
+import streamlit as st
 import plotly.express as px
 import plotly.io as pio
 
@@ -2967,18 +2968,41 @@ def _severity_count_columns(df):
 
 
 def _normalize_kabco_value(value):
+    """Normalize common severity text into K/A/B/C/O.
+
+    Important order: B must be checked before A because phrases such as
+    "Evident Non-Incapacitating (B)" contain the substring "incapacitating".
+    If A is checked first, B crashes are incorrectly counted as A and vanish
+    from the stacked year/KABCO chart.
+    """
+    if pd.isna(value):
+        return "Unknown"
     text = str(value).strip()
-    upper = text.upper()
+    upper = text.upper().strip()
     if upper in ["K", "A", "B", "C", "O"]:
         return upper
-    lower = text.lower()
-    if "fatal" in lower or "killed" in lower:
+    lower = text.lower().replace("_", " ").replace("-", " ")
+
+    # Direct code-in-label checks first.
+    if "(k)" in lower or lower.startswith("k "):
+        return "K"
+    if "(a)" in lower or "level a" in lower or lower.startswith("a "):
+        return "A"
+    if "(b)" in lower or "level b" in lower or lower.startswith("b "):
+        return "B"
+    if "(c)" in lower or "level c" in lower or lower.startswith("c "):
+        return "C"
+    if "(o)" in lower or lower.startswith("o "):
+        return "O"
+
+    # B before A because non-incapacitating contains incapacitating.
+    if "non incapac" in lower or "nonincap" in lower or "evident non" in lower or "minor" in lower or "level b" in lower:
+        return "B"
+    if "fatal" in lower or "killed" in lower or "death" in lower:
         return "K"
     if "serious" in lower or "incapac" in lower or "level a" in lower:
         return "A"
-    if "level b" in lower or "non-incap" in lower or "non incapac" in lower or "evident" in lower or "minor" in lower:
-        return "B"
-    if "level c" in lower or "possible" in lower or "complaint" in lower:
+    if "possible" in lower or "complaint" in lower or "level c" in lower:
         return "C"
     if "pdo" in lower or "no injury" in lower or "uninj" in lower or "property" in lower:
         return "O"
@@ -3823,3 +3847,585 @@ def _export_dashboard_docx(tables, selected_blocks, selected_maps, extra_figures
     doc.save(buffer)
     buffer.seek(0)
     return buffer.getvalue()
+
+# --- V31 dashboard data-detection, severity table, chart, and OSM-safe overrides ---
+
+def _crash_type_col(df):
+    """Find crash type / manner-of-collision field from uploaded, local, or FARS data."""
+    if df is None or getattr(df, "empty", True):
+        return None
+    exact_names = [
+        "Crash_Type", "CrashType", "CollisionType", "Manner_of_Collision",
+        "MannerOfCollision", "man_collname", "MAN_COLLNAME", "Man_CollName",
+        "harm_evname", "HARM_EVNAME", "FirstHarmfulEvent", "First_Harmful_Event",
+    ]
+    for wanted in exact_names:
+        for col in df.columns:
+            if str(col).lower().replace("_", "") == wanted.lower().replace("_", ""):
+                return col
+    for col in df.columns:
+        lower = str(col).lower()
+        if any(key in lower for key in ["man_coll", "manner", "collision", "crash_type", "crashtype"]):
+            if not any(bad in lower for bad in ["id", "case", "source"]):
+                return col
+    hints = [
+        "rear", "front", "head on", "angle", "sideswipe", "broadside", "approach",
+        "turn", "pedestrian", "bicycle", "fixed object", "parked", "overturn", "animal",
+    ]
+    best_col, best_score = None, 0
+    for col in df.columns:
+        lower = str(col).lower()
+        if any(bad in lower for bad in ["id", "case", "source", "year", "month", "day", "lat", "lon", "mile", "time", "date"]):
+            continue
+        try:
+            sample = " ".join(df[col].dropna().astype(str).head(500).str.lower().tolist())
+        except Exception:
+            continue
+        score = sum(1 for h in hints if h in sample)
+        if score > best_score:
+            best_col, best_score = col, score
+    return best_col if best_score >= 1 else None
+
+
+def _summary_kpi_values(crashes):
+    """Crash/person summary with proper crash-count vs person-count logic.
+
+    Fatal crashes and serious-injury crashes count unique crash/case IDs when an
+    ID field exists. Fatalities and serious injuries sum the person-count fields.
+    """
+    vals = {
+        "Total crashes": 0,
+        "Fatal crashes": 0,
+        "Fatalities": 0,
+        "Serious injury crashes": 0,
+        "Serious injuries": 0,
+    }
+    if crashes is None or getattr(crashes, "empty", True):
+        return vals
+    vals["Total crashes"] = _unique_crash_count(crashes)
+    sev_cols = _severity_count_columns(crashes)
+    kabco = _kabco_col(crashes)
+    if "K" in sev_cols:
+        fatal_vals = pd.to_numeric(crashes[sev_cols["K"]], errors="coerce").fillna(0)
+        vals["Fatalities"] = int(fatal_vals.sum())
+        vals["Fatal crashes"] = _unique_crash_count(crashes, fatal_vals > 0)
+    elif kabco and kabco in crashes.columns:
+        k = crashes[kabco].map(_normalize_kabco_value).astype(str).str.upper().str.strip()
+        vals["Fatal crashes"] = _unique_crash_count(crashes, k == "K")
+        vals["Fatalities"] = vals["Fatal crashes"]
+    if "A" in sev_cols:
+        serious_vals = pd.to_numeric(crashes[sev_cols["A"]], errors="coerce").fillna(0)
+        vals["Serious injuries"] = int(serious_vals.sum())
+        vals["Serious injury crashes"] = _unique_crash_count(crashes, serious_vals > 0)
+    elif kabco and kabco in crashes.columns:
+        k = crashes[kabco].map(_normalize_kabco_value).astype(str).str.upper().str.strip()
+        vals["Serious injury crashes"] = _unique_crash_count(crashes, k == "A")
+        vals["Serious injuries"] = vals["Serious injury crashes"]
+    return vals
+
+
+def _mode_severity_bubble_table(crashes):
+    """Travel-mode x severity table with a display-size field for readable bubbles."""
+    if crashes is None or getattr(crashes, "empty", True):
+        return pd.DataFrame(), None, None
+    kabco_col = _kabco_col(crashes)
+    if kabco_col and kabco_col in crashes.columns:
+        kabco_vals = crashes[kabco_col].map(_normalize_kabco_value)
+        base = crashes.copy()
+        base["KABCO_Normalized"] = kabco_vals
+        sev_col = "KABCO_Normalized"
+    else:
+        sev_cols = _severity_count_columns(crashes)
+        parts = []
+        for code, col in sev_cols.items():
+            tmp = crashes.copy()
+            tmp["KABCO_Normalized"] = code
+            tmp["__sev_count__"] = pd.to_numeric(tmp[col], errors="coerce").fillna(0)
+            tmp = tmp[tmp["__sev_count__"] > 0]
+            if not tmp.empty:
+                parts.append(tmp)
+        if not parts:
+            return pd.DataFrame(), None, None
+        base = pd.concat(parts, ignore_index=True)
+        sev_col = "KABCO_Normalized"
+
+    # Detect mode from crash type text and common vehicle/mode fields.
+    text_cols = []
+    for c in base.columns:
+        lower = str(c).lower()
+        if any(k in lower for k in ["crash", "type", "manner", "collision", "vehicle", "veh", "body", "mode", "person"]):
+            text_cols.append(c)
+    def mode_for_row(row):
+        text = " ".join(str(row.get(c, "")) for c in text_cols).lower()
+        if "ped" in text or "pedestrian" in text:
+            return "Pedestrian"
+        if "bike" in text or "bicycle" in text or "cycl" in text:
+            return "Bicycle"
+        if "motorcycle" in text or "motor cycle" in text:
+            return "Motorcycle"
+        if "bus" in text or "transit" in text or "school bus" in text:
+            return "Bus / transit"
+        return "Motor vehicle / other"
+    base["Mode"] = base.apply(mode_for_row, axis=1)
+    if "__sev_count__" in base.columns:
+        out = base.groupby([sev_col, "Mode"], dropna=False)["__sev_count__"].sum().reset_index(name="Count")
+    else:
+        out = base.groupby([sev_col, "Mode"], dropna=False).size().reset_index(name="Count")
+    out = out.rename(columns={sev_col: "KABCO"})
+    out = out[out["KABCO"].astype(str).isin(["K", "A", "B", "C", "O"])]
+    if out.empty:
+        return pd.DataFrame(), None, None
+    full = pd.MultiIndex.from_product([ ["K","A","B","C","O"], sorted(out["Mode"].unique()) ], names=["KABCO", "Mode"]).to_frame(index=False)
+    out = full.merge(out, on=["KABCO", "Mode"], how="left").fillna({"Count": 0})
+    out["Count"] = pd.to_numeric(out["Count"], errors="coerce").fillna(0)
+    # sqrt scale makes small bike/pedestrian bubbles visible without letting vehicle PDO dominate.
+    out["BubbleSize"] = (out["Count"].pow(0.5) * 8 + 8).round(2)
+    out = _order_kabco(out, "KABCO")
+    return out, "KABCO", "Mode"
+
+
+def _spatial_unit_severity_table(tables, top_n=20):
+    """Each row is one spatial unit; K/A/B/C/O columns contain crash/person counts."""
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    if crashes is None or getattr(crashes, "empty", True):
+        return pd.DataFrame()
+    unit_col = _unit_col(crashes) or _normal_col(crashes, ["UnitID", "IntersectionID", "CorridorID", "SegmentID", "SegID"])
+    if not unit_col:
+        return pd.DataFrame()
+    work = _drop_geometry(crashes).copy()
+    sev_cols = _severity_count_columns(work)
+    rows = None
+    if sev_cols:
+        agg = work[[unit_col] + list(sev_cols.values())].copy()
+        for code, col in sev_cols.items():
+            agg[code] = pd.to_numeric(agg[col], errors="coerce").fillna(0)
+        rows = agg.groupby(unit_col, dropna=False)[[c for c in ["K", "A", "B", "C", "O"] if c in agg.columns]].sum().reset_index()
+    else:
+        kabco = _kabco_col(work)
+        if not kabco or kabco not in work.columns:
+            return pd.DataFrame()
+        work["KABCO_Normalized"] = work[kabco].map(_normalize_kabco_value)
+        rows = work.groupby([unit_col, "KABCO_Normalized"], dropna=False).size().reset_index(name="Count")
+        rows = rows[rows["KABCO_Normalized"].isin(["K", "A", "B", "C", "O"])]
+        if rows.empty:
+            return pd.DataFrame()
+        rows = rows.pivot_table(index=unit_col, columns="KABCO_Normalized", values="Count", aggfunc="sum", fill_value=0).reset_index()
+    for code in ["K", "A", "B", "C", "O"]:
+        if code not in rows.columns:
+            rows[code] = 0
+    rows["Total"] = rows[["K", "A", "B", "C", "O"]].sum(axis=1)
+    rows = rows.sort_values("Total", ascending=False).head(top_n).reset_index(drop=True)
+    rows.insert(0, "Rank", range(1, len(rows) + 1))
+    rows = rows.rename(columns={unit_col: "Spatial unit id"})
+    return rows[["Rank", "Spatial unit id", "K", "A", "B", "C", "O", "Total"]]
+
+
+def _export_tables_only(tables, top_n=20):
+    out = {}
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    density = tables.get("Crash density results")
+    hin = tables.get("HIN risk segments", tables.get("HIN corridors"))
+    if crashes is not None:
+        type_col = _crash_type_col(crashes)
+        if type_col:
+            out["Crash type summary"] = _aggregate(crashes, type_col, None, "Count", top_n)
+        years = _year_series_from_crashes(crashes)
+        if years is not None:
+            ydf = pd.DataFrame({"Year": years})
+            ydf = ydf[ydf["Year"].ne("Unknown")]
+            out["Crash year summary"] = ydf.groupby("Year", dropna=False).size().reset_index(name="Count").sort_values("Year")
+        sev = _spatial_unit_severity_table(tables, top_n=top_n)
+        if not sev.empty:
+            out["Severity summary by spatial unit"] = sev
+    if density is not None:
+        top_density = _top_density_export_table(density, top_n=top_n)
+        if not top_density.empty:
+            out["Top crash-density spatial units"] = top_density
+    if hin is not None:
+        top_hin = _top_hin_export_table(hin, top_n=top_n)
+        if not top_hin.empty:
+            out["Top HIN/risk spatial units"] = top_hin
+    return {name: _safe_dataframe_for_display(df) for name, df in out.items()}
+
+
+def _render_pattern_charts(st, tables):
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    density = tables.get("Crash density results")
+    hin = tables.get("HIN risk segments", tables.get("HIN corridors"))
+
+    _render_kpi_strip(st, crashes)
+    st.markdown("<div class='dashboard-section-title'>Crash patterns <span>years, crash type, month, KABCO, mode, and roadway context</span></div>", unsafe_allow_html=True)
+    left, right = st.columns(2)
+    with left:
+        if crashes is not None:
+            year_kabco, year_col, kabco_col = _year_kabco_table(crashes)
+            if not year_kabco.empty:
+                fig = px.bar(year_kabco, x=year_col, y="Count", color=kabco_col, color_discrete_map=KABCO_COLOR_MAP, category_orders={kabco_col: ["K","A","B","C","O"]}, title=f"Crashes by year and {kabco_col}", hover_data={"Count": True, kabco_col: True})
+                fig.update_layout(height=_chart_height(), margin=dict(l=20, r=20, t=45, b=35), barmode="stack", xaxis_title="Year", yaxis_title="Crash count")
+                st.plotly_chart(_apply_kabco_trace_colors(_polish_figure(fig)), width="stretch")
+            else:
+                years = _year_series_from_crashes(crashes)
+                if years is not None:
+                    ydf = pd.DataFrame({"Year": years})
+                    ydf = ydf[ydf["Year"].ne("Unknown")].groupby("Year").size().reset_index(name="Count")
+                    fig = px.bar(ydf.sort_values("Year"), x="Year", y="Count", title="Crashes by year")
+                    fig.update_layout(height=_chart_height(), margin=dict(l=20, r=20, t=45, b=35), xaxis_title="Year", yaxis_title="Crash count")
+                    st.plotly_chart(_polish_figure(fig), width="stretch")
+    with right:
+        if crashes is not None:
+            type_col = _crash_type_col(crashes)
+            if type_col:
+                type_df = _aggregate(crashes, type_col, None, "Count", 10)
+                fig = px.pie(type_df, names=type_col, values="Count", hole=0.38, title=f"Crash type share by {type_col}")
+                fig.update_layout(height=_chart_height(), margin=dict(l=20, r=20, t=45, b=35), legend=dict(orientation="v"))
+                st.plotly_chart(_polish_figure(fig), width="stretch")
+
+    left2, right2 = st.columns(2)
+    with left2:
+        monthly_df, period_col, value_col, color_col = _month_trend_table(crashes)
+        if not monthly_df.empty:
+            fig = px.line(monthly_df, x=period_col, y=value_col, color=color_col, markers=True, category_orders={period_col: MONTH_ORDER}, title="Monthly crash trend by year")
+            fig.update_layout(height=_chart_height(), margin=dict(l=20, r=20, t=45, b=35), xaxis_title="Month", yaxis_title="Crash count")
+            st.plotly_chart(_polish_figure(fig), width="stretch")
+    with right2:
+        mode_df, mode_kabco_col, mode_col = _mode_severity_bubble_table(crashes)
+        if not mode_df.empty:
+            fig = px.scatter(mode_df, x=mode_kabco_col, y=mode_col, size="BubbleSize", color=mode_col, size_max=42, title="Travel mode severity bubble chart", hover_data={"Count": True, "BubbleSize": False})
+            fig.update_traces(marker=dict(sizemin=7, opacity=0.80, line=dict(width=1, color="white")))
+            fig.update_layout(height=_chart_height(), margin=dict(l=20, r=20, t=45, b=35), xaxis_title="Severity", yaxis_title="Mode")
+            st.plotly_chart(_polish_figure(fig), width="stretch")
+
+    road_kabco, road_col, road_kabco_col = _road_class_kabco_table(crashes, st_obj=st)
+    if not road_kabco.empty:
+        left3, right3 = st.columns(2)
+        with left3:
+            pivot = road_kabco.pivot_table(index=road_col, columns=road_kabco_col, values="Count", aggfunc="sum", fill_value=0)
+            order = [c for c in ["K","A","B","C","O"] if c in pivot.columns]
+            pivot = pivot[order + [c for c in pivot.columns if c not in order]]
+            fig = px.imshow(pivot, text_auto=True, aspect="auto", title=f"Road class by {road_kabco_col}", labels=dict(x=road_kabco_col, y="Road class", color="Crash count"), color_continuous_scale="YlOrRd")
+            fig.update_layout(height=380, margin=dict(l=20, r=20, t=45, b=35))
+            st.plotly_chart(_polish_figure(fig), width="stretch")
+        with right3:
+            tree = road_kabco.copy(); tree["All crashes"] = "All crashes"
+            fig = px.treemap(tree, path=["All crashes", road_col, road_kabco_col], values="Count", color=road_kabco_col, color_discrete_map=KABCO_COLOR_MAP, title=f"Road class and {road_kabco_col} treemap")
+            fig.update_layout(height=380, margin=dict(l=20, r=20, t=45, b=35))
+            st.plotly_chart(_polish_figure(fig), width="stretch")
+
+    crash_kabco, crash_type_col, crash_kabco_col = _crash_type_kabco_table(crashes)
+    if not crash_kabco.empty:
+        pivot = crash_kabco.pivot_table(index=crash_type_col, columns=crash_kabco_col, values="Count", aggfunc="sum", fill_value=0)
+        order = [c for c in ["K","A","B","C","O"] if c in pivot.columns]
+        pivot = pivot[order + [c for c in pivot.columns if c not in order]]
+        fig = px.imshow(pivot, text_auto=True, aspect="auto", title=f"Crash type by {crash_kabco_col}", labels=dict(x=crash_kabco_col, y="Crash type", color="Crash count"), color_continuous_scale="YlOrRd")
+        fig.update_layout(height=430, margin=dict(l=20, r=20, t=45, b=35))
+        st.plotly_chart(_polish_figure(fig), width="stretch")
+
+    st.markdown("<div class='dashboard-section-title'>Risk and spatial-unit ranking <span>crash density, crash count, and HIN priority ranking</span></div>", unsafe_allow_html=True)
+    left, right = st.columns(2)
+    with left:
+        if density is not None:
+            metric = "CrashDensity" if "CrashDensity" in density.columns else _default_metric(_numeric_cols(density))
+            rank_df, unit_col, value_col = _rank_units_for_chart(density, metric, 15) if metric else (pd.DataFrame(), None, None)
+            if not rank_df.empty:
+                plot_df = rank_df.sort_values(value_col, ascending=True)
+                fig = px.bar(plot_df, y=unit_col, x=value_col, orientation="h", hover_data=_context_cols_for_hover(plot_df), title="Top spatial units by crash density")
+                fig.update_layout(height=_chart_height(), margin=dict(l=20, r=20, t=45, b=35), yaxis_title="Spatial unit ID", xaxis_title="Crash density")
+                st.plotly_chart(_polish_figure(fig), width="stretch")
+    with right:
+        if density is not None:
+            count_col = _crash_count_col(density)
+            rank_df, unit_col, value_col = _rank_units_for_chart(density, count_col, 15) if count_col else (pd.DataFrame(), None, None)
+            if not rank_df.empty:
+                plot_df = rank_df.sort_values(value_col, ascending=True)
+                fig = px.bar(plot_df, y=unit_col, x=value_col, orientation="h", hover_data=_context_cols_for_hover(plot_df), title="Top spatial units by crash count")
+                fig.update_layout(height=_chart_height(), margin=dict(l=20, r=20, t=45, b=35), yaxis_title="Spatial unit ID", xaxis_title="Crash count")
+                st.plotly_chart(_polish_figure(fig), width="stretch")
+    if hin is not None:
+        metric = "HIN_Priority_Index" if "HIN_Priority_Index" in hin.columns else _default_metric(_numeric_cols(hin))
+        hin_tbl = _hin_table_for_display(hin, metric, 20) if metric else pd.DataFrame()
+        if not hin_tbl.empty:
+            st.markdown("<div class='dashboard-section-title'>HIN priority ranking <span>table view with route and window/segment context</span></div>", unsafe_allow_html=True)
+            st.dataframe(_safe_dataframe_for_display(hin_tbl), width="stretch", height=360)
+    _render_hin_network_summary(st, hin, crashes)
+
+
+def _build_default_figures(tables):
+    figures = []
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    density = tables.get("Crash density results")
+    hin = tables.get("HIN risk segments", tables.get("HIN corridors"))
+    if crashes is not None:
+        year_kabco, year_col, kabco_col = _year_kabco_table(crashes)
+        if not year_kabco.empty:
+            fig = px.bar(year_kabco, x=year_col, y="Count", color=kabco_col, color_discrete_map=KABCO_COLOR_MAP, category_orders={kabco_col: ["K","A","B","C","O"]}, title=f"Crashes by year and {kabco_col}")
+            fig.update_layout(barmode="stack", xaxis_title="Year", yaxis_title="Crash count")
+            figures.append((f"Crashes by year and {kabco_col}", _apply_kabco_trace_colors(_polish_figure(fig)), year_kabco))
+        type_col = _crash_type_col(crashes)
+        if type_col:
+            type_df = _aggregate(crashes, type_col, None, "Count", 12)
+            pie = px.pie(type_df, names=type_col, values="Count", hole=0.38, title=f"Crash type share by {type_col}")
+            figures.append((f"Crash type share by {type_col}", _polish_figure(pie), type_df))
+        monthly_df, period_col, value_col, color_col = _month_trend_table(crashes)
+        if not monthly_df.empty:
+            fig = px.line(monthly_df, x=period_col, y=value_col, color=color_col, markers=True, category_orders={period_col: MONTH_ORDER}, title="Monthly crash trend by year")
+            figures.append(("Monthly crash trend by year", _polish_figure(fig), monthly_df))
+        mode_df, mode_kabco_col, mode_col = _mode_severity_bubble_table(crashes)
+        if not mode_df.empty:
+            fig = px.scatter(mode_df, x=mode_kabco_col, y=mode_col, size="BubbleSize", color=mode_col, size_max=42, title="Travel mode severity bubble chart", hover_data={"Count": True, "BubbleSize": False})
+            fig.update_traces(marker=dict(sizemin=7, opacity=0.80, line=dict(width=1, color="white")))
+            figures.append(("Travel mode severity bubble chart", _polish_figure(fig), mode_df))
+        road_kabco, road_col, road_kabco_col = _road_class_kabco_table(crashes, st_obj=None)
+        if not road_kabco.empty:
+            tree = road_kabco.copy(); tree["All crashes"] = "All crashes"
+            fig = px.treemap(tree, path=["All crashes", road_col, road_kabco_col], values="Count", color=road_kabco_col, color_discrete_map=KABCO_COLOR_MAP, title=f"Road class and {road_kabco_col} treemap")
+            figures.append((f"Road class and {road_kabco_col} treemap", _polish_figure(fig), tree))
+        crash_kabco, crash_type_col, crash_kabco_col = _crash_type_kabco_table(crashes)
+        if not crash_kabco.empty:
+            pivot = crash_kabco.pivot_table(index=crash_type_col, columns=crash_kabco_col, values="Count", aggfunc="sum", fill_value=0)
+            fig = px.imshow(pivot, text_auto=True, aspect="auto", title=f"Crash type by {crash_kabco_col}", labels=dict(x=crash_kabco_col, y="Crash type", color="Crash count"), color_continuous_scale="YlOrRd")
+            figures.append((f"Crash type by {crash_kabco_col}", _polish_figure(fig), pivot.reset_index()))
+    if density is not None:
+        metric = "CrashDensity" if "CrashDensity" in density.columns else _default_metric(_numeric_cols(density))
+        rank_df, unit_col, value_col = _rank_units_for_chart(density, metric, 15) if metric else (pd.DataFrame(), None, None)
+        if not rank_df.empty:
+            plot_df = rank_df.sort_values(value_col, ascending=True)
+            fig = px.bar(plot_df, y=unit_col, x=value_col, orientation="h", hover_data=_context_cols_for_hover(plot_df), title="Top spatial units by crash density")
+            fig.update_layout(yaxis_title="Spatial unit ID", xaxis_title="Crash density")
+            figures.append(("Top spatial units by crash density", _polish_figure(fig), rank_df))
+    # HIN priority is intentionally exported as a report table, not as a confusing bar chart.
+    return figures
+
+# --- V35 field-mapping overrides -------------------------------------------------
+# These final overrides make dashboard/report logic use the user-confirmed crash
+# field mapping and canonical Dashboard* columns when available.  This reduces
+# dependence on hard-coded agency-specific column names.
+try:
+    from modules.crash_field_mapping import normalize_kabco_value, parse_month_value
+except Exception:  # pragma: no cover
+    normalize_kabco_value = lambda v: v
+    parse_month_value = lambda v: None
+
+
+def _mapped_col(df, semantic_name):
+    try:
+        mapping = st.session_state.get("crash_field_mapping", {})
+    except Exception:
+        mapping = {}
+    c = mapping.get(semantic_name, "") if isinstance(mapping, dict) else ""
+    return c if df is not None and c in df.columns else None
+
+
+def _crash_type_col(df):
+    if df is None:
+        return None
+    if "DashboardCrashType" in df.columns:
+        return "DashboardCrashType"
+    mapped = _mapped_col(df, "crash_type")
+    if mapped:
+        return mapped
+    return (
+        _find_col(df, ["crash", "type"])
+        or _find_col(df, ["collision", "type"])
+        or _find_col(df, ["manner"])
+        or _find_col(df, ["man", "coll"])
+        or _find_col(df, ["type"])
+    )
+
+
+def _kabco_col(df):
+    if df is None:
+        return None
+    if "DashboardKABCO" in df.columns:
+        return "DashboardKABCO"
+    mapped = _mapped_col(df, "severity")
+    if mapped:
+        return mapped
+    for c in df.columns:
+        lower = str(c).lower().replace("_", "")
+        if lower == "kabco" or "kabco" in lower:
+            return c
+    for c in df.columns:
+        lower = str(c).lower()
+        if "severity" in lower or "injury" in lower:
+            return c
+    return None
+
+
+def _time_col(df):
+    if df is None:
+        return None
+    if "DashboardCrashDate" in df.columns:
+        return "DashboardCrashDate"
+    mapped = _mapped_col(df, "crash_date")
+    if mapped:
+        return mapped
+    return (
+        _find_col(df, ["date"])
+        or _find_col(df, ["time"])
+        or _find_col(df, ["datetime"])
+    )
+
+
+def _year_series_from_crashes(crashes):
+    if crashes is None or getattr(crashes, "empty", True):
+        return None
+    if "DashboardCrashYear" in crashes.columns:
+        y = pd.to_numeric(crashes["DashboardCrashYear"], errors="coerce")
+        y = y.where((y >= 1900) & (y <= 2100))
+        if y.notna().any():
+            return y.dropna().astype(int).astype(str)
+    mapped = _mapped_col(crashes, "crash_year")
+    if mapped:
+        y = pd.to_numeric(crashes[mapped], errors="coerce")
+        y = y.where((y >= 1900) & (y <= 2100))
+        if y.notna().any():
+            return y.dropna().astype(int).astype(str)
+    date_col = _time_col(crashes)
+    if date_col:
+        dt = pd.to_datetime(crashes[date_col], errors="coerce")
+        if dt.notna().any():
+            return dt.dt.year.dropna().astype(int).astype(str)
+    return None
+
+
+def _month_trend_table(crashes):
+    """Return Jan-Dec crash counts with one line per year using mapped fields."""
+    if crashes is None or getattr(crashes, "empty", True):
+        return pd.DataFrame(), "Month", "Crash count", "Year"
+    work = pd.DataFrame(index=crashes.index)
+    if "DashboardCrashYear" in crashes.columns:
+        work["Year"] = pd.to_numeric(crashes["DashboardCrashYear"], errors="coerce")
+    else:
+        year_col = _mapped_col(crashes, "crash_year") or _find_col(crashes, ["year"])
+        if year_col:
+            work["Year"] = pd.to_numeric(crashes[year_col], errors="coerce")
+    if "DashboardCrashMonth" in crashes.columns:
+        work["MonthNum"] = pd.to_numeric(crashes["DashboardCrashMonth"], errors="coerce")
+    else:
+        month_col = _mapped_col(crashes, "crash_month") or _find_col(crashes, ["month"])
+        if month_col:
+            work["MonthNum"] = crashes[month_col].map(parse_month_value)
+    if "Year" not in work or "MonthNum" not in work:
+        date_col = _time_col(crashes)
+        if date_col:
+            dt = pd.to_datetime(crashes[date_col], errors="coerce")
+            if "Year" not in work:
+                work["Year"] = dt.dt.year
+            if "MonthNum" not in work:
+                work["MonthNum"] = dt.dt.month
+    if "Year" not in work or "MonthNum" not in work:
+        return pd.DataFrame(), "Month", "Crash count", "Year"
+    work["Year"] = pd.to_numeric(work["Year"], errors="coerce")
+    work["MonthNum"] = pd.to_numeric(work["MonthNum"], errors="coerce")
+    work = work[(work["Year"] >= 1900) & (work["Year"] <= 2100) & (work["MonthNum"] >= 1) & (work["MonthNum"] <= 12)].copy()
+    if work.empty:
+        return pd.DataFrame(), "Month", "Crash count", "Year"
+    work["Year"] = work["Year"].astype(int).astype(str)
+    work["MonthNum"] = work["MonthNum"].astype(int)
+    out = work.groupby(["Year", "MonthNum"], dropna=False).size().reset_index(name="Crash count")
+    years = sorted(out["Year"].unique(), key=lambda x: int(x) if str(x).isdigit() else str(x))
+    full = pd.MultiIndex.from_product([years, range(1, 13)], names=["Year", "MonthNum"]).to_frame(index=False)
+    out = full.merge(out, on=["Year", "MonthNum"], how="left").fillna({"Crash count": 0})
+    out["Crash count"] = out["Crash count"].astype(int)
+    out["Month"] = out["MonthNum"].map(lambda m: MONTH_ORDER[int(m) - 1])
+    return out[["Year", "Month", "Crash count"]], "Month", "Crash count", "Year"
+
+
+def _year_kabco_table(crashes):
+    """Return crash counts by year and normalized KABCO for stacked annual bars."""
+    if crashes is None or getattr(crashes, "empty", True):
+        return pd.DataFrame(), "Year", "KABCO"
+    years = _year_series_from_crashes(crashes)
+    kabco_col = _kabco_col(crashes)
+    if years is None or not kabco_col or kabco_col not in crashes.columns:
+        return pd.DataFrame(), "Year", "KABCO"
+    work = pd.DataFrame({"Year": years.reindex(crashes.index), "KABCO": crashes[kabco_col].map(normalize_kabco_value)})
+    work = work.dropna(subset=["Year"])
+    work = work[work["KABCO"].isin(["K", "A", "B", "C", "O"])]
+    if work.empty:
+        return pd.DataFrame(), "Year", "KABCO"
+    out = work.groupby(["Year", "KABCO"], dropna=False).size().reset_index(name="Count")
+    years_sorted = sorted(out["Year"].unique(), key=lambda x: int(x) if str(x).isdigit() else str(x))
+    full = pd.MultiIndex.from_product([years_sorted, ["K", "A", "B", "C", "O"]], names=["Year", "KABCO"]).to_frame(index=False)
+    out = full.merge(out, on=["Year", "KABCO"], how="left").fillna({"Count": 0})
+    out["Count"] = out["Count"].astype(int)
+    return out, "Year", "KABCO"
+
+
+def _severity_count_columns(df):
+    """Find person-count severity columns, preferring canonical Dashboard fields."""
+    if df is None:
+        return {}
+    canonical = {
+        "K": "DashboardFatalities",
+        "A": "DashboardSeriousInjuries",
+        "B": "DashboardMinorInjuries",
+        "C": "DashboardPossibleInjuries",
+        "O": "DashboardNoInjury",
+    }
+    found = {k: v for k, v in canonical.items() if v in df.columns}
+    if any(v for v in found.values()):
+        return found
+    mapping = {
+        "K": _mapped_col(df, "fatalities"),
+        "A": _mapped_col(df, "serious_injuries"),
+        "B": _mapped_col(df, "minor_injuries"),
+        "C": _mapped_col(df, "possible_injuries"),
+        "O": _mapped_col(df, "no_injury"),
+    }
+    found = {k: v for k, v in mapping.items() if v}
+    if found:
+        return found
+    # Fallback to prior keyword logic if available from older definitions.
+    result = {}
+    names = {str(c).lower().replace("_", "").replace(" ", ""): c for c in df.columns}
+    patterns = {
+        "K": ["fatalities", "fatals", "fatalcount", "fatalinjuries", "killed"],
+        "A": ["levelainjuries", "seriousinjuries", "ainjuries", "incapacitating"],
+        "B": ["levelbinjuries", "binjuries", "nonincapacitating", "minorinjuries"],
+        "C": ["levelcinjuries", "cinjuries", "possibleinjuries", "complaintofinjury"],
+        "O": ["uninjured", "noinjury", "pdo", "propertydamageonly"],
+    }
+    for code, pats in patterns.items():
+        for p in pats:
+            for n, c in names.items():
+                if p in n:
+                    result[code] = c
+                    break
+            if code in result:
+                break
+    return result
+
+
+def _summary_kpi_values(crashes):
+    """Crash/person summary using mapped/canonical severity fields."""
+    vals = {
+        "Total crashes": int(len(crashes)) if crashes is not None else 0,
+        "Fatal crashes": 0,
+        "Fatalities": 0,
+        "Serious injury crashes": 0,
+        "Serious injuries": 0,
+    }
+    if crashes is None or getattr(crashes, "empty", True):
+        return vals
+    sev_cols = _severity_count_columns(crashes)
+    if sev_cols.get("K"):
+        fatal_vals = pd.to_numeric(crashes[sev_cols["K"]], errors="coerce").fillna(0)
+        vals["Fatalities"] = int(fatal_vals.sum())
+        vals["Fatal crashes"] = _unique_crash_count(crashes, fatal_vals > 0) if "_unique_crash_count" in globals() else int((fatal_vals > 0).sum())
+    if sev_cols.get("A"):
+        serious_vals = pd.to_numeric(crashes[sev_cols["A"]], errors="coerce").fillna(0)
+        vals["Serious injuries"] = int(serious_vals.sum())
+        vals["Serious injury crashes"] = _unique_crash_count(crashes, serious_vals > 0) if "_unique_crash_count" in globals() else int((serious_vals > 0).sum())
+    kabco_col = _kabco_col(crashes)
+    if kabco_col and kabco_col in crashes.columns:
+        k = crashes[kabco_col].map(normalize_kabco_value)
+        if vals["Fatal crashes"] == 0:
+            vals["Fatal crashes"] = _unique_crash_count(crashes, k == "K") if "_unique_crash_count" in globals() else int((k == "K").sum())
+        if vals["Serious injury crashes"] == 0:
+            vals["Serious injury crashes"] = _unique_crash_count(crashes, k == "A") if "_unique_crash_count" in globals() else int((k == "A").sum())
+        if vals["Fatalities"] == 0:
+            vals["Fatalities"] = vals["Fatal crashes"]
+        if vals["Serious injuries"] == 0:
+            vals["Serious injuries"] = vals["Serious injury crashes"]
+    return vals

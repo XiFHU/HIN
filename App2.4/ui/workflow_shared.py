@@ -55,6 +55,14 @@ def render_workflow(spatial_unit, st_folium, workflow_context):
     st = workflow_context["st"]
     status = _workflow_status(st)
 
+    with st.expander("App limits and data quality notes", expanded=False):
+        st.caption(
+            "Large road/crash datasets can be slow, especially on Streamlit Cloud. "
+            "Clip to the study boundary early, use road-class filters for very large OSM/TIGER networks, "
+            "and avoid drawing huge result layers all at once. OSM traffic signals and road classes are crowd-sourced, "
+            "so signal completeness and classification accuracy vary by location."
+        )
+
     data_expanded = (
         not status["roads"]
         or bool(st.session_state.get("road_class_layer_enabled", False))
