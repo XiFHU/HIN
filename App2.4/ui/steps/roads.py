@@ -425,6 +425,8 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
         horizontal=False
     )
 
+    st.session_state["road_source_label"] = road_source
+
     roads = None
     places = None
     base_roads = None

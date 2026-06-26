@@ -109,13 +109,77 @@ def _score_column(col, aliases):
     best = 0
     for alias in aliases:
         a = _norm(alias)
+        if not a:
+            continue
+        # Single-letter aliases such as K/A/B/C/O should only match exact
+        # column names.  Otherwise a severity field named KABCO can be
+        # incorrectly selected as a B/C/O person-count field.
+        if len(a) == 1:
+            if n == a:
+                best = max(best, 100)
+            continue
         if n == a:
             best = max(best, 100)
-        elif a and a in n:
+        elif a in n:
             best = max(best, 85)
-        elif n and n in a:
+        elif n and n in a and len(n) > 2:
             best = max(best, 70)
     return best
+
+
+def _first_existing_column(df, candidates):
+    if df is None:
+        return None
+    lower_map = {str(c).lower().replace("_", "").replace(" ", ""): c for c in df.columns}
+    for candidate in candidates:
+        key = str(candidate).lower().replace("_", "").replace(" ", "")
+        if key in lower_map:
+            return lower_map[key]
+    for c in df.columns:
+        low = str(c).lower().replace("_", "").replace(" ", "")
+        for candidate in candidates:
+            key = str(candidate).lower().replace("_", "").replace(" ", "")
+            if key and key in low:
+                return c
+    return None
+
+
+def is_fars_fatal_only_dataset(df):
+    """Return True for the FARS Accident fatal-crash dataset.
+
+    FARS Accident rows are fatal crashes only.  Injury-count columns in the
+    Accident table should not be interpreted as local K/A/B/C/O crash counts.
+    """
+    if df is None or getattr(df, "empty", True):
+        return False
+    if "CrashSource" in df.columns:
+        try:
+            if df["CrashSource"].dropna().astype(str).str.upper().eq("FARS").any():
+                return True
+        except Exception:
+            pass
+    cols = {str(c).lower() for c in df.columns}
+    return ("st_case" in cols or "sourcecrashid" in cols) and ("fatals" in cols or "fatalities" in cols)
+
+
+def _apply_fars_mapping_defaults(df, mapping):
+    mapping = {key: mapping.get(key, "") for key in CANONICAL_FIELDS}
+    if not is_fars_fatal_only_dataset(df):
+        return mapping
+    mapping["crash_id"] = _first_existing_column(df, ["SourceCrashID", "ST_CASE", "CrashID", "Case_ID"]) or mapping.get("crash_id", "")
+    mapping["crash_year"] = _first_existing_column(df, ["Year", "YEAR", "CaseYear"]) or mapping.get("crash_year", "")
+    mapping["crash_month"] = _first_existing_column(df, ["MonthName", "MONTHNAME", "Month", "MONTH"]) or mapping.get("crash_month", "")
+    mapping["crash_type"] = _first_existing_column(df, ["man_collname", "MAN_COLLNAME", "Crash_Type", "CrashType", "Manner"]) or mapping.get("crash_type", "")
+    mapping["severity"] = _first_existing_column(df, ["KABCO", "CrashSeverity"]) or mapping.get("severity", "")
+    mapping["fatalities"] = _first_existing_column(df, ["Fatalities", "FATALITIES", "Fatals", "FATALS"]) or mapping.get("fatalities", "")
+    # FARS Accident is fatal-only.  Do not auto-map these to generic injury
+    # fields because they are not local crash-level A/B/C/O counts.
+    mapping["serious_injuries"] = ""
+    mapping["minor_injuries"] = ""
+    mapping["possible_injuries"] = ""
+    mapping["no_injury"] = ""
+    mapping["mode"] = _first_existing_column(df, ["VehType_1", "BodyType", "PersonType", "Vehicle_Type"]) or mapping.get("mode", "")
+    return mapping
 
 
 def detect_field_mapping(df):
@@ -150,6 +214,8 @@ def detect_field_mapping(df):
                 continue
         if best_hits >= 2:
             mapping["crash_type"] = best_col
+
+    mapping = _apply_fars_mapping_defaults(df, mapping)
 
     return mapping
 
@@ -278,6 +344,17 @@ def apply_field_mapping(df, mapping):
     out["DashboardMinorInjuries"] = _as_numeric_series(out, minor_col)
     out["DashboardPossibleInjuries"] = _as_numeric_series(out, possible_col)
     out["DashboardNoInjury"] = _as_numeric_series(out, noinj_col)
+    if is_fars_fatal_only_dataset(out):
+        out["DashboardKABCO"] = "K"
+        out["KABCO"] = "K"
+        if "DashboardFatalities" not in out.columns or pd.to_numeric(out["DashboardFatalities"], errors="coerce").fillna(0).sum() == 0:
+            out["DashboardFatalities"] = 1
+        out["DashboardSeriousInjuries"] = 0
+        out["DashboardMinorInjuries"] = 0
+        out["DashboardPossibleInjuries"] = 0
+        out["DashboardNoInjury"] = 0
+        out["DashboardFatalOnlySource"] = True
+
     out["DashboardFatalCrashFlag"] = (out["DashboardFatalities"] > 0) | (out.get("DashboardKABCO", "") == "K")
     out["DashboardSeriousCrashFlag"] = (out["DashboardSeriousInjuries"] > 0) | (out.get("DashboardKABCO", "") == "A")
 
@@ -296,6 +373,10 @@ def render_field_mapping_ui(st, df, key_prefix="crash_field_mapping"):
     state_key = f"{key_prefix}_values"
     if state_key not in st.session_state:
         st.session_state[state_key] = detected
+    elif is_fars_fatal_only_dataset(df):
+        # Clean old session mappings from earlier app versions where KABCO could
+        # have been incorrectly selected as B/C/O person-count columns.
+        st.session_state[state_key] = _apply_fars_mapping_defaults(df, st.session_state[state_key])
 
     columns = [""] + [c for c in df.columns if str(c).lower() != "geometry"]
     with st.expander("Crash field mapping", expanded=False):
