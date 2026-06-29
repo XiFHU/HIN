@@ -116,8 +116,6 @@ App/
       downloads.py
       dashboard.py
 
-Keep only one README.txt in the App folder.
-
 Workflow options
 ----------------
 The app has three main workflow modes:
@@ -671,23 +669,6 @@ Signals should not be forced into report maps, because green signal points can b
 
 For dense segment maps, report map segment line width should be thin enough to see the network clearly.
 
-Dashboard Assistant
--------------------
-The Dashboard Assistant is a rule-based natural-language helper.
-
-It does not require model training.
-
-It should understand requests such as:
-
-- Show crash type share as a pie chart.
-- KABCO count by year stacked chart.
-- Line chart crash count by year.
-- Monthly crash trend.
-- Crash type by KABCO heatmap.
-- Top 10 segments by crash density.
-- Create a dashboard with crash year trend, crash type chart, top risky units, and crash density map.
-
-If it cannot confidently match a requested variable to a dataset column, it should ask the user to select the exact column.
 
 Clear history / start over
 --------------------------
@@ -707,22 +688,6 @@ Static map export
 -----------------
 Static map images in Word reports are generated from selected layers. They may not exactly match the interactive Folium map because web basemap tiles and matplotlib/static rendering behave differently.
 
-Dashboard Assistant
--------------------
-The assistant uses rules, aliases, and fuzzy matching. It is not a trained language model.
-
-This is usually enough because the app domain is limited to known roadway safety terms such as crash type, crash year, KABCO, severity, crash density, HIN, road class, intersection, corridor, segment, route, and milepost.
-
-Troubleshooting
----------------
-The app imports old files or shows an old UI
---------------------------------------------
-Run from inside the current App folder:
-
-cd /d "C:\path\to\current\App"
-python -m streamlit run app2.4.py
-
-Do not run from an old extracted folder.
 
 Shapefile ZIP upload fails
 --------------------------
@@ -735,28 +700,6 @@ Make sure the ZIP contains at least:
 
 If possible, use GeoPackage .gpkg, which is often more reliable than shapefile ZIP.
 
-Streamlit Cloud says Plotly is missing
---------------------------------------
-Add this to requirements.txt:
-
-plotly
-
-Then redeploy the app.
-
-PNG export does not work
-------------------------
-Install or add:
-
-kaleido
-
-Dashboard table gives a PyArrow error
--------------------------------------
-This can happen when a column contains mixed object types. The app includes display sanitization, but if the error appears again, convert mixed columns to strings before displaying them with st.dataframe().
-
-Map opens at world scale
-------------------------
-Refresh after the result layer is available. Also confirm the layer has valid geometry and CRS.
-
 Suggested future improvements
 -----------------------------
 Possible future improvements include:
@@ -766,5 +709,4 @@ Possible future improvements include:
 - Direct map-based corridor deletion.
 - Saved dashboard templates.
 - User-defined report templates.
-- More advanced Dashboard Assistant intent parsing.
 - Standalone HTML dashboard export with embedded charts and maps.
