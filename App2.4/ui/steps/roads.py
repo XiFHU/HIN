@@ -734,19 +734,10 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                                 "'City, State/Province, Country'."
                             )
                         else:
-                            sources = sorted(
-                                set(
-                                    str(s.get("source", "OSM"))
-                                    for s in suggestions
-                                )
-                            )
-
                             st.success(
                                 f"Found {len(suggestions)} possible places. "
                                 "Choose the correct city/county/state/country "
-                                "from the dropdown below. Source: "
-                                + ", ".join(sources)
-                                + "."
+                                "from the dropdown below."
                             )
 
                     except Exception as e:
@@ -780,7 +771,17 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                 if not display_name:
                     continue
 
-                label = item.get("label", display_name)
+                label = str(
+                    item.get(
+                        "label",
+                        ""
+                    )
+                ).strip()
+
+                if not label:
+                    label = str(
+                        display_name
+                    ).strip()
 
                 option = f"{idx + 1}. {label}"
 
@@ -814,8 +815,15 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                         "osm_selected_place_info"
                     ] = selected_place_info_for_download
 
+                selected_clean_label = str(
+                    selected_place_info_for_download.get("label", "")
+                    if selected_place_info_for_download is not None
+                    else ""
+                ).strip()
+
                 st.caption(
-                    f"Selected for download: {selected_place_for_download}"
+                    "Selected for download: "
+                    + (selected_clean_label or str(selected_place_for_download))
                 )
 
                 if selected_place_info_for_download is not None:
@@ -830,8 +838,8 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                         )
                     elif selected_source.lower().startswith("photon"):
                         st.caption(
-                            "This place was found using fallback search. The app will "
-                            "try to retrieve the exact OSM boundary before downloading roads."
+                            "The app will try to retrieve the exact OSM boundary "
+                            "before downloading roads."
                         )
 
                 if st.button(
