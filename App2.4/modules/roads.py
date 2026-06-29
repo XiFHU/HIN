@@ -516,24 +516,30 @@ def _parse_osm_place_parts(place_query):
 
 
 def _osm_suggestion_search_requests(place_query, limit=20):
-    """Build global Nominatim suggestion requests.
+    """Build one Nominatim suggestion request.
 
-    Supports:
-    - City
-    - City, State
-    - City, Country
-    - City, State, Country
-    - City, County, State, Country
-
-    This does not assume Colorado or any default country.
+    Important:
+    Nominatim is rate-limited. Do not send many query variants for one
+    dropdown search click. One free-form global search is enough to return
+    multiple candidate places.
     """
-    raw, parts = _parse_osm_place_parts(place_query)
+    raw = " ".join(str(place_query or "").replace("\n", " ").split()).strip()
 
     if not raw:
         return []
 
-    requests_out = []
-    seen = set()
+    return [
+        {
+            "q": raw,
+            "format": "jsonv2",
+            "addressdetails": 1,
+            "extratags": 1,
+            "namedetails": 1,
+            "dedupe": 0,
+            "limit": int(limit),
+            "accept-language": "en",
+        }
+    ]
 
     def add(params):
         params = dict(params)
@@ -741,6 +747,12 @@ def suggest_osm_places(place_query, limit=20):
                 timeout=25,
             )
 
+            if response.status_code == 429:
+                raise ValueError(
+                    "OSM/Nominatim returned HTTP 429 Too Many Requests. "
+                    "Please wait 1-2 minutes and try again. "
+                    "This usually happens when the app sends too many place-search requests too quickly."
+                )
             if response.status_code != 200:
                 errors.append(
                     f"HTTP {response.status_code}: {response.text[:200]}"
