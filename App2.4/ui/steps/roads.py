@@ -659,21 +659,32 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
             "Find matching OSM places",
             key="find_osm_place_suggestions"
         ):
-            suggestions = suggest_osm_places(
-                place_query,
-                limit=8
-            )
-            st.session_state["osm_place_suggestions"] = suggestions
-            st.session_state["osm_place_suggestion_query"] = place_query
-
-            if not suggestions:
-                st.warning(
-                    "No OSM place suggestions were found. You can still try the Download OSM roads button below using the exact text you entered. "
-                    "If it fails, try a more complete query such as 'City, State/Province, Country'."
+            try:
+                suggestions = suggest_osm_places(
+                    place_query,
+                    limit=20
                 )
-            else:
-                st.success(
-                    f"Found {len(suggestions)} possible OSM places. Choose the correct one from the dropdown below."
+
+                st.session_state["osm_place_suggestions"] = suggestions
+                st.session_state["osm_place_suggestion_query"] = place_query
+
+                if not suggestions:
+                    st.warning(
+                        "No OSM place suggestions were found. "
+                        "Try a more complete query such as "
+                        "'City, State/Province, Country'."
+                    )
+                else:
+                    st.success(
+                        f"Found {len(suggestions)} possible OSM places. "
+                        "Choose the correct city/county/state/country from the dropdown below."
+                    )
+
+            except Exception as e:
+                st.session_state["osm_place_suggestions"] = []
+                st.session_state["osm_place_suggestion_query"] = place_query
+                st.error(
+                    f"OSM place search failed: {e}"
                 )
 
         suggestions = st.session_state.get(
