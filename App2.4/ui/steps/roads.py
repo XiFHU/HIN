@@ -677,12 +677,14 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                 else:
                     st.success(
                         f"Found {len(suggestions)} possible OSM places. "
-                        "Choose the correct city/county/state/country from the dropdown below."
+                        "Choose the correct city/county/state/country "
+                        "from the dropdown below."
                     )
 
             except Exception as e:
                 st.session_state["osm_place_suggestions"] = []
                 st.session_state["osm_place_suggestion_query"] = place_query
+
                 st.error(
                     f"OSM place search failed: {e}"
                 )
