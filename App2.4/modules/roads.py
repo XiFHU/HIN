@@ -496,6 +496,42 @@ def _boundary_from_bbox(bbox):
     )
 
 
+def _boundary_from_geojson(geojson_obj):
+    """Create an EPSG:4326 boundary GeoDataFrame from Nominatim GeoJSON.
+
+    Using the polygon returned during the dropdown search avoids a second
+    Nominatim geocode request and is usually faster than downloading roads
+    from a rectangular bounding box.
+    """
+    if not geojson_obj:
+        return None
+
+    try:
+        from shapely.geometry import shape
+
+        geom = shape(geojson_obj)
+
+        if geom is None or geom.is_empty:
+            return None
+
+        if geom.geom_type not in [
+            "Polygon",
+            "MultiPolygon",
+        ]:
+            return None
+
+        return gpd.GeoDataFrame(
+            {
+                "BoundarySource": ["Nominatim search polygon"],
+            },
+            geometry=[geom],
+            crs="EPSG:4326",
+        )
+
+    except Exception:
+        return None
+
+
 def _finalize_osm_roads(roads):
     """Clean OSMnx edge GeoDataFrame and add fields used by the app."""
     if roads is None or roads.empty:
@@ -521,6 +557,56 @@ def _finalize_osm_roads(roads):
     roads["RoadType"] = roads["OSMHighway"].fillna("Unknown")
 
     return roads
+
+
+def _download_osm_roads_from_boundary(boundary, network_type="drive"):
+    """Download OSM roads using an existing boundary polygon.
+
+    This avoids calling Nominatim again during the road download step.
+    """
+    try:
+        import osmnx as ox
+    except Exception as exc:
+        raise ImportError(
+            "OSMnx is required for the no-upload OSM road option. "
+            "Install the requirements.txt package list and try again."
+        ) from exc
+
+    if boundary is None or boundary.empty:
+        raise ValueError("No usable boundary polygon was available for this OSM place.")
+
+    boundary = boundary.to_crs(4326)
+    boundary_geom = _safe_union(boundary.geometry)
+
+    graph = ox.graph_from_polygon(
+        boundary_geom,
+        network_type=network_type,
+        simplify=True,
+        retain_all=False,
+        truncate_by_edge=True,
+    )
+
+    roads = ox.graph_to_gdfs(
+        graph,
+        nodes=False,
+        fill_edge_geometry=True,
+    ).reset_index()
+
+    roads = _finalize_osm_roads(roads)
+
+    if roads is None or roads.empty:
+        raise ValueError("No usable OSM road geometries were returned for the selected boundary.")
+
+    try:
+        boundary_geom = _safe_union(boundary.geometry)
+        roads = roads[roads.intersects(boundary_geom)].copy()
+    except Exception:
+        pass
+
+    if roads.empty:
+        raise ValueError("Roads were empty after clipping to the selected boundary.")
+
+    return roads.reset_index(drop=True), boundary
 
 
 def _download_osm_roads_from_bbox(bbox, network_type="drive"):
@@ -603,10 +689,13 @@ def _download_osm_roads_from_bbox(bbox, network_type="drive"):
 def fetch_osm_roads_for_place(place_query, network_type="drive", place_info=None):
     """Download OSM roads for a selected place.
 
-    If the user selected a dropdown suggestion that includes a bounding box,
-    this function downloads roads from that bbox first. That avoids a second
-    Nominatim call during Download OSM roads, which helps prevent HTTP 429.
-    If no bbox is available, it falls back to the original OSMnx geocode method.
+    Priority order:
+    1. Use the Nominatim polygon saved from the dropdown search.
+    2. Use the saved bounding box from the dropdown search.
+    3. Fall back to OSMnx geocoding by place name.
+
+    This keeps the dropdown behavior while avoiding extra geocoder requests
+    whenever the selected suggestion already contains geometry.
     """
     if place_query is None or not str(place_query).strip():
         raise ValueError("Enter a study area place name before downloading OSM roads.")
@@ -621,8 +710,20 @@ def fetch_osm_roads_for_place(place_query, network_type="drive", place_info=None
 
     errors = []
 
-    bbox = None
     if isinstance(place_info, dict):
+        boundary = _boundary_from_geojson(
+            place_info.get("geojson")
+        )
+
+        if boundary is not None and not boundary.empty:
+            try:
+                return _download_osm_roads_from_boundary(
+                    boundary,
+                    network_type=network_type,
+                )
+            except Exception as exc:
+                errors.append(f"saved polygon download: {exc}")
+
         bbox = _normalize_bbox_dict(
             place_info.get("bbox")
             or place_info.get("boundingbox")
@@ -634,14 +735,14 @@ def fetch_osm_roads_for_place(place_query, network_type="drive", place_info=None
                 place_info.get("lon"),
             )
 
-    if bbox is not None:
-        try:
-            return _download_osm_roads_from_bbox(
-                bbox,
-                network_type=network_type,
-            )
-        except Exception as exc:
-            errors.append(f"bbox download: {exc}")
+        if bbox is not None:
+            try:
+                return _download_osm_roads_from_bbox(
+                    bbox,
+                    network_type=network_type,
+                )
+            except Exception as exc:
+                errors.append(f"saved bbox download: {exc}")
 
     for query in _osm_query_candidates(place_query):
         try:
@@ -651,44 +752,10 @@ def fetch_osm_roads_for_place(place_query, network_type="drive", place_info=None
                 errors.append(f"{query}: no boundary returned")
                 continue
 
-            boundary_geom = _safe_union(boundary.geometry)
-
-            graph = ox.graph_from_polygon(
-                boundary_geom,
+            roads, boundary = _download_osm_roads_from_boundary(
+                boundary,
                 network_type=network_type,
-                simplify=True,
-                retain_all=False,
-                truncate_by_edge=True,
             )
-
-            roads = ox.graph_to_gdfs(
-                graph,
-                nodes=False,
-                fill_edge_geometry=True,
-            ).reset_index()
-
-            if roads.empty:
-                errors.append(f"{query}: no roads returned")
-                continue
-
-            roads = _finalize_osm_roads(roads)
-
-            if roads.empty:
-                errors.append(f"{query}: no usable road geometries")
-                continue
-
-            try:
-                boundary_for_clip = boundary[["geometry"]].copy()
-                if boundary_for_clip.crs != roads.crs:
-                    boundary_for_clip = boundary_for_clip.to_crs(roads.crs)
-                boundary_geom = _safe_union(boundary_for_clip.geometry)
-                roads = roads[roads.intersects(boundary_geom)].copy()
-            except Exception:
-                pass
-
-            if roads.empty:
-                errors.append(f"{query}: roads were empty after clipping")
-                continue
 
             return roads.reset_index(drop=True), boundary
 
@@ -697,10 +764,9 @@ def fetch_osm_roads_for_place(place_query, network_type="drive", place_info=None
 
     detail = " | ".join(errors[-3:]) if errors else "No OSM/Nominatim boundary was found."
     raise ValueError(
-        "Unable to download OSM roads for the study area. Tried query variants. "
+        "Unable to download OSM roads for the study area. Tried saved geometry and query variants. "
         + detail
     )
-
 
 def _osm_suggestion_search_requests(place_query, limit=20):
     """Build one global Nominatim suggestion request.
@@ -721,6 +787,7 @@ def _osm_suggestion_search_requests(place_query, limit=20):
             "addressdetails": 1,
             "extratags": 1,
             "namedetails": 1,
+            "polygon_geojson": 1,
             "dedupe": 0,
             "limit": int(limit),
             "accept-language": "en",
@@ -977,6 +1044,7 @@ def suggest_osm_places(place_query, limit=20):
                     "lat": item.get("lat", ""),
                     "lon": item.get("lon", ""),
                     "bbox": bbox,
+                    "geojson": item.get("geojson"),
                     "source": "Nominatim",
                 }
             )
