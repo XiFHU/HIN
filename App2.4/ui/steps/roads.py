@@ -643,16 +643,18 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
             None
         )
 
+        if "osm_place_query_input" not in st.session_state:
+            st.session_state["osm_place_query_input"] = st.session_state.get(
+                "osm_place_query",
+                st.session_state.get("area_name", "")
+            )
+
         if pending_place_query:
             st.session_state["osm_place_query"] = pending_place_query
             st.session_state["osm_place_query_input"] = pending_place_query
 
         place_query = st.text_input(
             "Study area place name",
-            value=st.session_state.get(
-                "osm_place_query",
-                st.session_state.get("area_name", "")
-            ),
             placeholder="Example: Aurora, CO, USA or Paris, France",
             key="osm_place_query_input"
         )
@@ -824,7 +826,7 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                     and selected_place_info_for_download.get("bbox")
                 ):
                     st.caption(
-                        "This selected place includes a bounding box, so the "
+                        "This selected place includes saved geometry, so the "
                         "Download OSM roads step can avoid another Nominatim "
                         "geocoder request."
                     )
@@ -867,11 +869,15 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
         ):
 
             try:
-                roads, selected_boundary = fetch_osm_roads_for_place(
-                    selected_place_for_download,
-                    network_type=network_type,
-                    place_info=selected_place_info_for_download
-                )
+                with st.spinner(
+                    "Downloading OSM roads for the selected place. "
+                    "Larger cities can take a few minutes."
+                ):
+                    roads, selected_boundary = fetch_osm_roads_for_place(
+                        selected_place_for_download,
+                        network_type=network_type,
+                        place_info=selected_place_info_for_download
+                    )
 
                 st.session_state["osm_raw_roads"] = roads
                 st.session_state["selected_boundary"] = selected_boundary
