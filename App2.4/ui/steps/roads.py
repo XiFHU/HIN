@@ -781,11 +781,8 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                     continue
 
                 label = item.get("label", display_name)
-                source = item.get("source", "OSM")
 
                 option = f"{idx + 1}. {label}"
-                if source:
-                    option = f"{option} — {source}"
 
                 suggestion_options.append(option)
                 option_to_display_name[option] = display_name
@@ -821,15 +818,21 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                     f"Selected for download: {selected_place_for_download}"
                 )
 
-                if (
-                    selected_place_info_for_download is not None
-                    and selected_place_info_for_download.get("bbox")
-                ):
-                    st.caption(
-                        "This selected place includes saved geometry, so the "
-                        "Download OSM roads step can avoid another Nominatim "
-                        "geocoder request."
+                if selected_place_info_for_download is not None:
+                    selected_source = str(
+                        selected_place_info_for_download.get("source", "OSM")
                     )
+
+                    if selected_place_info_for_download.get("geojson"):
+                        st.caption(
+                            "This selected place includes a saved boundary polygon. "
+                            "The Download OSM roads step will use that exact boundary."
+                        )
+                    elif selected_source.lower().startswith("photon"):
+                        st.caption(
+                            "This place was found using fallback search. The app will "
+                            "try to retrieve the exact OSM boundary before downloading roads."
+                        )
 
                 if st.button(
                     "Use selected place name",
