@@ -691,11 +691,14 @@ def fetch_osm_roads_for_place(place_query, network_type="drive", place_info=None
 
     Priority order:
     1. Use the Nominatim polygon saved from the dropdown search.
-    2. Use the saved bounding box from the dropdown search.
-    3. Fall back to OSMnx geocoding by place name.
-
-    This keeps the dropdown behavior while avoiding extra geocoder requests
-    whenever the selected suggestion already contains geometry.
+    2. If the selected suggestion came from Nominatim and only has a bbox,
+       use that bbox as a fallback.
+    3. If the selected suggestion came from Photon, do not download by bbox.
+       Photon usually does not provide the true municipal boundary polygon,
+       so bbox download can include the wrong area and look different from the
+       older OSM version. Instead, use OSMnx/Nominatim geocoding to retrieve
+       the real boundary polygon.
+    4. Fall back to OSMnx geocoding by place name.
     """
     if place_query is None or not str(place_query).strip():
         raise ValueError("Enter a study area place name before downloading OSM roads.")
@@ -710,7 +713,10 @@ def fetch_osm_roads_for_place(place_query, network_type="drive", place_info=None
 
     errors = []
 
+    place_source = ""
     if isinstance(place_info, dict):
+        place_source = str(place_info.get("source", "")).lower()
+
         boundary = _boundary_from_geojson(
             place_info.get("geojson")
         )
@@ -724,25 +730,35 @@ def fetch_osm_roads_for_place(place_query, network_type="drive", place_info=None
             except Exception as exc:
                 errors.append(f"saved polygon download: {exc}")
 
-        bbox = _normalize_bbox_dict(
-            place_info.get("bbox")
-            or place_info.get("boundingbox")
-        )
-
-        if bbox is None:
-            bbox = _bbox_from_point(
-                place_info.get("lat"),
-                place_info.get("lon"),
+        # Only use a saved rectangular bbox when the result came from
+        # Nominatim. Photon fallback often returns only an extent/point, not
+        # the true city boundary. Using that rectangle caused the Centennial
+        # shape to look different and could include surrounding jurisdictions.
+        if not place_source.startswith("photon"):
+            bbox = _normalize_bbox_dict(
+                place_info.get("bbox")
+                or place_info.get("boundingbox")
             )
 
-        if bbox is not None:
-            try:
-                return _download_osm_roads_from_bbox(
-                    bbox,
-                    network_type=network_type,
+            if bbox is None:
+                bbox = _bbox_from_point(
+                    place_info.get("lat"),
+                    place_info.get("lon"),
                 )
-            except Exception as exc:
-                errors.append(f"saved bbox download: {exc}")
+
+            if bbox is not None:
+                try:
+                    return _download_osm_roads_from_bbox(
+                        bbox,
+                        network_type=network_type,
+                    )
+                except Exception as exc:
+                    errors.append(f"saved bbox download: {exc}")
+        else:
+            errors.append(
+                "Photon fallback selected; skipped rectangular bbox download "
+                "because it is not a true municipal boundary"
+            )
 
     for query in _osm_query_candidates(place_query):
         try:
@@ -764,9 +780,10 @@ def fetch_osm_roads_for_place(place_query, network_type="drive", place_info=None
 
     detail = " | ".join(errors[-3:]) if errors else "No OSM/Nominatim boundary was found."
     raise ValueError(
-        "Unable to download OSM roads for the study area. Tried saved geometry and query variants. "
+        "Unable to download OSM roads for the study area. Tried saved polygon and query variants. "
         + detail
     )
+
 
 def _osm_suggestion_search_requests(place_query, limit=20):
     """Build one global Nominatim suggestion request.
@@ -795,8 +812,56 @@ def _osm_suggestion_search_requests(place_query, limit=20):
     ]
 
 
+OSM_PLACE_RESULT_VALUES = {
+    "administrative",
+    "borough",
+    "city",
+    "county",
+    "district",
+    "hamlet",
+    "locality",
+    "municipality",
+    "neighbourhood",
+    "quarter",
+    "region",
+    "state",
+    "suburb",
+    "town",
+    "village",
+}
+
+OSM_PLACE_RESULT_CLASSES = {
+    "boundary",
+    "place",
+}
+
+
+def _is_city_like_suggestion(item):
+    """Keep dropdown suggestions focused on places/boundaries.
+
+    This removes Photon/Nominatim POI matches such as schools, aerodromes,
+    prisons, landuse areas, and natural areas. The OSM road workflow needs a
+    city/study-area boundary, not a point-of-interest.
+    """
+    osm_class = str(item.get("class", "") or item.get("osm_key", "")).strip().lower()
+    osm_type = str(item.get("type", "") or item.get("osm_value", "")).strip().lower()
+
+    if osm_class in OSM_PLACE_RESULT_CLASSES:
+        return True
+
+    if osm_type in OSM_PLACE_RESULT_VALUES:
+        return True
+
+    return False
+
+
 def _format_osm_suggestion_label(item):
-    """Create a compact city / county / state / country dropdown label."""
+    """Create a compact city / county / state / country dropdown label.
+
+    The label intentionally does not append the source or OSM type text after
+    the country. The dropdown should stay clean, for example:
+    Centennial, Arapahoe, Colorado, United States
+    """
     display_name = str(item.get("display_name", "")).strip()
     address = item.get("address") or {}
 
@@ -827,32 +892,10 @@ def _format_osm_suggestion_label(item):
 
     country = address.get("country") or ""
 
-    osm_class = str(item.get("class", "")).strip()
-    osm_type = str(item.get("type", "")).strip()
-
-    parts = [
-        p for p in [
-            city,
-            county,
-            state,
-            country
-        ]
-        if p
-    ]
-
+    parts = [p for p in [city, county, state, country] if p]
     compact = ", ".join(parts)
 
-    type_text = ""
-    if osm_class or osm_type:
-        type_text = f" [{osm_class}/{osm_type}]".replace("[/", "[").replace("/]", "]")
-
-    if compact:
-        return f"{compact}{type_text}"
-
-    if display_name:
-        return f"{display_name}{type_text}"
-
-    return ""
+    return compact or display_name
 
 
 def _suggest_osm_places_with_photon(place_query, limit=20):
@@ -897,8 +940,6 @@ def _suggest_osm_places_with_photon(place_query, limit=20):
 
         parts = [p for p in [city, county, state, country] if p]
         label = ", ".join(parts)
-        if osm_key or osm_value:
-            label = f"{label} [{osm_key}/{osm_value}]".replace("[/", "[").replace("/]", "]")
 
         display_name_parts = [p for p in [name, county, state, country] if p]
         display_name = ", ".join(display_name_parts) or raw
@@ -921,6 +962,15 @@ def _suggest_osm_places_with_photon(place_query, limit=20):
 
         if bbox is None:
             bbox = _bbox_from_point(lat, lon)
+
+        candidate = {
+            "class": osm_key,
+            "type": osm_value,
+            "display_name": display_name,
+        }
+
+        if not _is_city_like_suggestion(candidate):
+            continue
 
         key = (
             str(props.get("osm_type", "")),
@@ -1030,6 +1080,9 @@ def suggest_osm_places(place_query, limit=20):
                 continue
 
             seen.add(key)
+
+            if not _is_city_like_suggestion(item):
+                continue
 
             label = _format_osm_suggestion_label(item)
 
