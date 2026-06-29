@@ -715,7 +715,7 @@ def fetch_osm_roads_for_place(place_query, network_type="drive", place_info=None
 
     place_source = ""
     if isinstance(place_info, dict):
-        place_source = str(place_info.get("source", "")).lower()
+        place_source = str(place_info.get("_source", "") or place_info.get("source", "")).lower()
 
         boundary = _boundary_from_geojson(
             place_info.get("geojson")
@@ -837,32 +837,71 @@ OSM_PLACE_RESULT_CLASSES = {
 
 
 def _is_city_like_suggestion(item):
-    """Keep dropdown suggestions focused on places/boundaries.
+    """Return True only for city/municipality-like suggestions.
 
-    This removes Photon/Nominatim POI matches such as schools, aerodromes,
-    prisons, landuse areas, and natural areas. The OSM road workflow needs a
-    city/study-area boundary, not a point-of-interest.
+    The OSM road workflow needs a city or municipal boundary. This filter
+    removes schools, airports, scrub/landuse polygons, prisons, colleges,
+    and other points of interest from the dropdown.
     """
-    osm_class = str(item.get("class", "") or item.get("osm_key", "")).strip().lower()
-    osm_type = str(item.get("type", "") or item.get("osm_value", "")).strip().lower()
+    osm_class = str(
+        item.get("class", "")
+        or item.get("osm_key", "")
+        or item.get("_osm_class", "")
+    ).strip().lower()
 
-    if osm_class in OSM_PLACE_RESULT_CLASSES:
-        return True
+    osm_type = str(
+        item.get("type", "")
+        or item.get("osm_value", "")
+        or item.get("_osm_type", "")
+    ).strip().lower()
 
-    if osm_type in OSM_PLACE_RESULT_VALUES:
-        return True
+    allowed_classes = {
+        "boundary",
+        "place",
+    }
 
-    return False
+    allowed_types = {
+        "administrative",
+        "city",
+        "town",
+        "village",
+        "municipality",
+        "borough",
+        "locality",
+        "hamlet",
+        "suburb",
+        "neighbourhood",
+        "quarter",
+    }
+
+    return osm_class in allowed_classes or osm_type in allowed_types
+
+
+def _clean_place_part(value):
+    """Clean one location label part for dropdown display."""
+    text = str(value or "").strip()
+
+    for bad in [
+        " County",
+        " county",
+        " Municipality",
+        " municipality",
+    ]:
+        if text.endswith(bad):
+            text = text[: -len(bad)].strip()
+
+    return text
 
 
 def _format_osm_suggestion_label(item):
-    """Create a compact city / county / state / country dropdown label.
+    """Create clean city/county/state/country dropdown label.
 
-    The label intentionally does not append the source or OSM type text after
-    the country. The dropdown should stay clean, for example:
+    The dropdown should only show location text, for example:
     Centennial, Arapahoe, Colorado, United States
+
+    Do not append OSM class/type text or provider text such as:
+    [place/municipality] or Photon fallback.
     """
-    display_name = str(item.get("display_name", "")).strip()
     address = item.get("address") or {}
 
     city = (
@@ -892,14 +931,135 @@ def _format_osm_suggestion_label(item):
 
     country = address.get("country") or ""
 
-    parts = [p for p in [city, county, state, country] if p]
-    compact = ", ".join(parts)
+    parts = [
+        _clean_place_part(p)
+        for p in [
+            city,
+            county,
+            state,
+            country,
+        ]
+        if _clean_place_part(p)
+    ]
 
-    return compact or display_name
+    label_parts = []
+    seen_parts = set()
+
+    for part in parts:
+        key = part.lower()
+        if key not in seen_parts:
+            label_parts.append(part)
+            seen_parts.add(key)
+
+    return ", ".join(label_parts)
+
+
+def _photon_feature_to_suggestion(feature, raw_query):
+    """Convert one Photon feature to a clean city-like suggestion.
+
+    Returns None when the feature is not city-like.
+    """
+    props = feature.get("properties") or {}
+    geom = feature.get("geometry") or {}
+    coords = geom.get("coordinates") or []
+
+    osm_key = str(props.get("osm_key") or "").strip().lower()
+    osm_value = str(props.get("osm_value") or "").strip().lower()
+
+    candidate = {
+        "class": osm_key,
+        "type": osm_value,
+        "osm_key": osm_key,
+        "osm_value": osm_value,
+    }
+
+    if not _is_city_like_suggestion(candidate):
+        return None
+
+    name = (
+        props.get("name")
+        or props.get("city")
+        or props.get("town")
+        or props.get("village")
+        or raw_query
+    )
+
+    city = (
+        props.get("city")
+        or props.get("town")
+        or props.get("village")
+        or props.get("municipality")
+        or props.get("locality")
+        or name
+    )
+
+    county = props.get("county") or props.get("district") or ""
+    state = props.get("state") or ""
+    country = props.get("country") or ""
+
+    item_for_label = {
+        "name": name,
+        "address": {
+            "city": city,
+            "county": county,
+            "state": state,
+            "country": country,
+        },
+    }
+
+    label = _format_osm_suggestion_label(item_for_label)
+
+    if not label:
+        return None
+
+    lon = coords[0] if len(coords) >= 2 else ""
+    lat = coords[1] if len(coords) >= 2 else ""
+
+    bbox = None
+    extent = props.get("extent")
+    if extent and len(extent) == 4:
+        # Photon extent order: west, north, east, south.
+        bbox = _normalize_bbox_dict(
+            {
+                "west": extent[0],
+                "north": extent[1],
+                "east": extent[2],
+                "south": extent[3],
+            }
+        )
+
+    if bbox is None:
+        bbox = _bbox_from_point(lat, lon)
+
+    display_name = label
+
+    return {
+        "display_name": display_name,
+        "label": label,
+        # Keep public display fields blank so older UI code cannot append
+        # [class/type] or fallback-provider text to the dropdown label.
+        "class": "",
+        "type": "",
+        "source": "",
+        # Keep internal fields for download logic/debugging.
+        "_osm_class": osm_key,
+        "_osm_type": osm_value,
+        "_source": "Photon fallback",
+        "osm_type": props.get("osm_type", ""),
+        "osm_id": props.get("osm_id", ""),
+        "lat": lat,
+        "lon": lon,
+        "bbox": bbox,
+        "geojson": None,
+    }
 
 
 def _suggest_osm_places_with_photon(place_query, limit=20):
-    """Fallback place suggestions using Photon when Nominatim returns 429."""
+    """Fallback place suggestions using Photon when Nominatim returns 429.
+
+    This fallback is strictly city/place-only. It does not return schools,
+    airports, natural areas, prisons, colleges, or other POIs.
+    """
     import requests
 
     raw = " ".join(str(place_query or "").replace("\n", " ").split()).strip()
@@ -910,7 +1070,7 @@ def _suggest_osm_places_with_photon(place_query, limit=20):
         "https://photon.komoot.io/api/",
         params={
             "q": raw,
-            "limit": int(limit),
+            "limit": max(int(limit) * 3, 20),
             "lang": "en",
         },
         headers={
@@ -923,78 +1083,25 @@ def _suggest_osm_places_with_photon(place_query, limit=20):
     data = response.json()
 
     suggestions = []
-    seen = set()
+    seen_labels = set()
 
     for feature in data.get("features", []):
-        props = feature.get("properties") or {}
-        geom = feature.get("geometry") or {}
-        coords = geom.get("coordinates") or []
+        suggestion = _photon_feature_to_suggestion(
+            feature,
+            raw_query=raw,
+        )
 
-        name = props.get("name") or props.get("city") or raw
-        city = props.get("city") or props.get("town") or props.get("village") or name
-        county = props.get("county") or props.get("district") or ""
-        state = props.get("state") or ""
-        country = props.get("country") or ""
-        osm_value = props.get("osm_value") or "place"
-        osm_key = props.get("osm_key") or ""
-
-        parts = [p for p in [city, county, state, country] if p]
-        label = ", ".join(parts)
-
-        display_name_parts = [p for p in [name, county, state, country] if p]
-        display_name = ", ".join(display_name_parts) or raw
-
-        lon = coords[0] if len(coords) >= 2 else ""
-        lat = coords[1] if len(coords) >= 2 else ""
-
-        bbox = None
-        extent = props.get("extent")
-        if extent and len(extent) == 4:
-            # Photon extent order: west, north, east, south.
-            bbox = _normalize_bbox_dict(
-                {
-                    "west": extent[0],
-                    "north": extent[1],
-                    "east": extent[2],
-                    "south": extent[3],
-                }
-            )
-
-        if bbox is None:
-            bbox = _bbox_from_point(lat, lon)
-
-        candidate = {
-            "class": osm_key,
-            "type": osm_value,
-            "display_name": display_name,
-        }
-
-        if not _is_city_like_suggestion(candidate):
+        if suggestion is None:
             continue
 
-        key = (
-            str(props.get("osm_type", "")),
-            str(props.get("osm_id", "")),
-            display_name.lower(),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
+        label = suggestion.get("label", "").strip()
+        label_key = label.lower()
 
-        suggestions.append(
-            {
-                "display_name": display_name,
-                "label": label or display_name,
-                "osm_type": props.get("osm_type", ""),
-                "osm_id": props.get("osm_id", ""),
-                "class": osm_key,
-                "type": osm_value,
-                "lat": lat,
-                "lon": lon,
-                "bbox": bbox,
-                "source": "Photon fallback",
-            }
-        )
+        if not label or label_key in seen_labels:
+            continue
+
+        seen_labels.add(label_key)
+        suggestions.append(suggestion)
 
         if len(suggestions) >= int(limit):
             break
@@ -1029,7 +1136,8 @@ def suggest_osm_places(place_query, limit=20):
     }
 
     suggestions = []
-    seen = set()
+    seen_ids = set()
+    seen_labels = set()
     errors = []
     saw_429 = False
 
@@ -1068,37 +1176,47 @@ def suggest_osm_places(place_query, limit=20):
             if not display_name:
                 continue
 
-            bbox = _normalize_bbox_dict(item.get("boundingbox"))
-
-            key = (
-                str(item.get("osm_type", "")),
-                str(item.get("osm_id", "")),
-                display_name.lower(),
-            )
-
-            if key in seen:
-                continue
-
-            seen.add(key)
-
             if not _is_city_like_suggestion(item):
                 continue
 
             label = _format_osm_suggestion_label(item)
 
+            if not label:
+                continue
+
+            id_key = (
+                str(item.get("osm_type", "")),
+                str(item.get("osm_id", "")),
+            )
+            label_key = label.lower()
+
+            if id_key in seen_ids or label_key in seen_labels:
+                continue
+
+            seen_ids.add(id_key)
+            seen_labels.add(label_key)
+
+            bbox = _normalize_bbox_dict(item.get("boundingbox"))
+
             suggestions.append(
                 {
                     "display_name": display_name,
-                    "label": label or display_name,
+                    "label": label,
                     "osm_type": item.get("osm_type", ""),
                     "osm_id": item.get("osm_id", ""),
-                    "class": item.get("class", ""),
-                    "type": item.get("type", ""),
+                    # Keep public display fields blank so older UI code cannot append
+                    # [class/type] or provider text to the dropdown label.
+                    "class": "",
+                    "type": "",
+                    "source": "",
+                    # Keep internal fields for download logic/debugging.
+                    "_osm_class": item.get("class", ""),
+                    "_osm_type": item.get("type", ""),
+                    "_source": "Nominatim",
                     "lat": item.get("lat", ""),
                     "lon": item.get("lon", ""),
                     "bbox": bbox,
                     "geojson": item.get("geojson"),
-                    "source": "Nominatim",
                 }
             )
 
