@@ -2437,7 +2437,7 @@ def render_dashboard_page(st):
 
     # Compact production dashboard: remove row/column status cards so charts have more room.
 
-    tab_insights, tab_builder, tab_tables, tab_assistant = st.tabs([
+    tab_insights, tab_builder, tab_tables = st.tabs([
         "Crash insights",
         "Dashboard builder",
         "Data tables",
