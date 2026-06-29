@@ -2219,12 +2219,12 @@ def _export_dashboard_docx(tables, selected_blocks, selected_maps, extra_figures
         if selected_blocks and title not in selected_blocks:
             continue
         doc.add_heading(title, level=1)
-        try:
-            img = pio.to_image(_polish_figure(fig), format="png", width=1200, height=680, scale=2)
+        img = _figure_to_png_bytes(_polish_figure(fig))
+        if img:
             img_buf = io.BytesIO(img)
             doc.add_picture(img_buf, width=Inches(6.5))
-        except Exception:
-            doc.add_paragraph("Chart image could not be generated. Install kaleido to include chart images.")
+        else:
+            doc.add_paragraph("Chart image could not be generated in this environment. The summary table is included below.")
         doc.add_paragraph("Summary table")
         table_df = _safe_dataframe_for_display(data.head(15).copy())
         if table_df.empty:
@@ -2368,7 +2368,7 @@ def _render_dashboard_builder(st, tables):
                 st.download_button(
                     "Download Word report",
                     data=docx_bytes,
-                    file_name="hin_dashboard_report.docx",
+                    file_name=_report_docx_filename(tables),
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     key="dash_export_docx",
                 )
@@ -2483,6 +2483,7 @@ def render_dashboard_page(st):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="dashboard_download_all_excel",
             )
+
 
 # --- V28 dashboard chart and HIN summary overrides ---
 
@@ -3383,7 +3384,7 @@ def _render_dashboard_builder(st, tables):
         with d2:
             docx_bytes = _export_dashboard_docx(tables, selected_blocks, selected_maps, extra_figures=custom_figures, maps=maps, overlay_layers={name: overlay_sources[name] for name in selected_overlays if name in overlay_sources}, report_timezone=report_tz_value)
             if docx_bytes is not None:
-                st.download_button("Download Word report", data=docx_bytes, file_name="hin_dashboard_report.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="dash_export_docx")
+                st.download_button("Download Word report", data=docx_bytes, file_name=_report_docx_filename(tables), mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="dash_export_docx")
             else:
                 st.info("Install python-docx for Word export.")
 
@@ -3794,11 +3795,11 @@ def _export_dashboard_docx(tables, selected_blocks, selected_maps, extra_figures
         if selected_blocks and title not in selected_blocks:
             continue
         doc.add_heading(title, level=1)
-        try:
-            img = pio.to_image(_polish_figure(fig), format="png", width=1200, height=680, scale=2)
+        img = _figure_to_png_bytes(_polish_figure(fig))
+        if img:
             doc.add_picture(io.BytesIO(img), width=Inches(6.5))
-        except Exception:
-            doc.add_paragraph("Chart image could not be generated. Install kaleido to include chart images.")
+        else:
+            doc.add_paragraph("Chart image could not be generated in this environment. The summary table is included below.")
         table_df = _safe_dataframe_for_display(data.head(15).copy())
         if not table_df.empty:
             doc.add_paragraph("Summary table")
@@ -4425,3 +4426,629 @@ def _summary_kpi_values(crashes):
         if vals["Serious injuries"] == 0:
             vals["Serious injuries"] = vals["Serious injury crashes"]
     return vals
+
+
+# --- V36 FARS, KPI, severity-summary, and report-image fallbacks ---------------
+def _is_fars_fatal_only_dataset(df):
+    if df is None or getattr(df, "empty", True):
+        return False
+    if "DashboardFatalOnlySource" in df.columns:
+        try:
+            return bool(pd.Series(df["DashboardFatalOnlySource"]).fillna(False).astype(bool).any())
+        except Exception:
+            return True
+    if "CrashSource" in df.columns:
+        try:
+            return df["CrashSource"].dropna().astype(str).str.upper().eq("FARS").any()
+        except Exception:
+            return True
+    try:
+        src = st.session_state.get("crash_source_label", "")
+        if "FARS" in str(src).upper():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _format_kpi_value(value):
+    if value is None:
+        return "N/A"
+    if isinstance(value, str):
+        return value
+    try:
+        if pd.isna(value):
+            return "N/A"
+    except Exception:
+        pass
+    try:
+        return f"{int(round(float(value))):,}"
+    except Exception:
+        return str(value)
+
+
+def _summary_kpi_values(crashes):
+    """Crash/person summary using mapped/canonical severity fields.
+
+    For FARS Accident data, rows are fatal crashes only, so total crashes and
+    fatal crashes are the same concept. Serious-injury metrics are not available
+    from the fatal-only Accident table and are shown as N/A.
+    """
+    vals = {
+        "Total crashes": int(len(crashes)) if crashes is not None else 0,
+        "Fatal crashes": 0,
+        "Fatalities": 0,
+        "Serious injury crashes": 0,
+        "Serious injuries": 0,
+    }
+    if crashes is None or getattr(crashes, "empty", True):
+        return vals
+
+    if _is_fars_fatal_only_dataset(crashes):
+        total = _unique_crash_count(crashes, pd.Series([True] * len(crashes), index=crashes.index)) if "_unique_crash_count" in globals() else int(len(crashes))
+        fatal_col = "DashboardFatalities" if "DashboardFatalities" in crashes.columns else None
+        if not fatal_col:
+            sev_cols = _severity_count_columns(crashes)
+            fatal_col = sev_cols.get("K")
+        if fatal_col and fatal_col in crashes.columns:
+            fatalities = int(pd.to_numeric(crashes[fatal_col], errors="coerce").fillna(1).sum())
+        else:
+            fatalities = int(total)
+        return {
+            "Total crashes": int(total),
+            "Fatal crashes": int(total),
+            "Fatalities": fatalities,
+            "Serious injury crashes": "N/A",
+            "Serious injuries": "N/A",
+        }
+
+    sev_cols = _severity_count_columns(crashes)
+    # Use person-count columns only when at least one mapped/canonical person
+    # count has positive values.  For single KABCO-text datasets, the canonical
+    # Dashboard* count columns may exist but be all zero.
+    positive_person_counts = False
+    for col in sev_cols.values():
+        if col in crashes.columns and pd.to_numeric(crashes[col], errors="coerce").fillna(0).sum() > 0:
+            positive_person_counts = True
+            break
+
+    if positive_person_counts and sev_cols.get("K"):
+        fatal_vals = pd.to_numeric(crashes[sev_cols["K"]], errors="coerce").fillna(0)
+        vals["Fatalities"] = int(fatal_vals.sum())
+        vals["Fatal crashes"] = _unique_crash_count(crashes, fatal_vals > 0) if "_unique_crash_count" in globals() else int((fatal_vals > 0).sum())
+    if positive_person_counts and sev_cols.get("A"):
+        serious_vals = pd.to_numeric(crashes[sev_cols["A"]], errors="coerce").fillna(0)
+        vals["Serious injuries"] = int(serious_vals.sum())
+        vals["Serious injury crashes"] = _unique_crash_count(crashes, serious_vals > 0) if "_unique_crash_count" in globals() else int((serious_vals > 0).sum())
+
+    kabco_col = _kabco_col(crashes)
+    if kabco_col and kabco_col in crashes.columns:
+        k = crashes[kabco_col].map(normalize_kabco_value)
+        if vals["Fatal crashes"] == 0:
+            vals["Fatal crashes"] = _unique_crash_count(crashes, k == "K") if "_unique_crash_count" in globals() else int((k == "K").sum())
+        if vals["Serious injury crashes"] == 0:
+            vals["Serious injury crashes"] = _unique_crash_count(crashes, k == "A") if "_unique_crash_count" in globals() else int((k == "A").sum())
+        if vals["Fatalities"] == 0:
+            vals["Fatalities"] = vals["Fatal crashes"]
+        if vals["Serious injuries"] == 0:
+            vals["Serious injuries"] = vals["Serious injury crashes"]
+    return vals
+
+
+def _render_kpi_strip(st, crashes):
+    vals = _summary_kpi_values(crashes)
+    st.markdown("<div class='dashboard-section-title'>Crash summary <span>selected study period and filters</span></div>", unsafe_allow_html=True)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    icons = ["🚗", "🛑", "💔", "⚠️", "🏥"]
+    for col, (label, value), icon in zip([c1, c2, c3, c4, c5], vals.items(), icons):
+        with col:
+            st.markdown(
+                f"""
+                <div style='border:1px solid #e5e7eb;border-radius:14px;padding:13px 14px;background:#ffffff;box-shadow:0 1px 4px rgba(15,23,42,.05)'>
+                  <div style='font-size:1.45rem'>{icon}</div>
+                  <div style='font-size:.80rem;color:#64748b'>{html.escape(label)}</div>
+                  <div style='font-size:1.65rem;font-weight:700;color:#0f172a'>{html.escape(_format_kpi_value(value))}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def _spatial_unit_severity_table(tables, top_n=20):
+    """Each row is one spatial unit; K/A/B/C/O columns contain counts.
+
+    If true person-count injury columns are mapped, sum those counts.  If the
+    dataset only has one KABCO/severity value per crash, count records by that
+    KABCO value.  FARS is fatal-only, so it will show K counts only.
+    """
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    if crashes is None or getattr(crashes, "empty", True):
+        return pd.DataFrame()
+    unit_col = _unit_col(crashes) or _normal_col(crashes, ["UnitID", "IntersectionID", "CorridorID", "SegmentID", "SegID"])
+    if not unit_col:
+        return pd.DataFrame()
+    work = _drop_geometry(crashes).copy()
+    sev_cols = _severity_count_columns(work)
+    use_person_counts = False
+    if sev_cols and not _is_fars_fatal_only_dataset(work):
+        for col in sev_cols.values():
+            if col in work.columns and pd.to_numeric(work[col], errors="coerce").fillna(0).sum() > 0:
+                use_person_counts = True
+                break
+    if use_person_counts:
+        agg = work[[unit_col] + list(sev_cols.values())].copy()
+        for code, col in sev_cols.items():
+            agg[code] = pd.to_numeric(agg[col], errors="coerce").fillna(0)
+        rows = agg.groupby(unit_col, dropna=False)[[c for c in ["K", "A", "B", "C", "O"] if c in agg.columns]].sum().reset_index()
+    else:
+        kabco = _kabco_col(work)
+        if not kabco or kabco not in work.columns:
+            return pd.DataFrame()
+        work["KABCO_Normalized"] = work[kabco].map(normalize_kabco_value)
+        rows = work.groupby([unit_col, "KABCO_Normalized"], dropna=False).size().reset_index(name="Count")
+        rows = rows[rows["KABCO_Normalized"].isin(["K", "A", "B", "C", "O"])]
+        if rows.empty:
+            return pd.DataFrame()
+        rows = rows.pivot_table(index=unit_col, columns="KABCO_Normalized", values="Count", aggfunc="sum", fill_value=0).reset_index()
+    for code in ["K", "A", "B", "C", "O"]:
+        if code not in rows.columns:
+            rows[code] = 0
+    rows["Total"] = rows[["K", "A", "B", "C", "O"]].sum(axis=1)
+    rows = rows.sort_values("Total", ascending=False).head(top_n).reset_index(drop=True)
+    rows.insert(0, "Rank", range(1, len(rows) + 1))
+    rows = rows.rename(columns={unit_col: "Spatial unit id"})
+    return rows[["Rank", "Spatial unit id", "K", "A", "B", "C", "O", "Total"]]
+
+
+def _matplotlib_figure_to_png_bytes(fig):
+    """Best-effort static image fallback when Plotly/Kaleido is unavailable."""
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        traces = list(getattr(fig, "data", []) or [])
+        if not traces:
+            return None
+        layout = getattr(fig, "layout", None)
+        title = ""
+        try:
+            title = layout.title.text or ""
+        except Exception:
+            title = ""
+        mfig, ax = plt.subplots(figsize=(10.5, 5.8))
+        first_type = getattr(traces[0], "type", "")
+        if first_type == "heatmap":
+            z = np.array(traces[0].z, dtype=float)
+            im = ax.imshow(z, aspect="auto")
+            x = list(traces[0].x) if traces[0].x is not None else list(range(z.shape[1]))
+            y = list(traces[0].y) if traces[0].y is not None else list(range(z.shape[0]))
+            ax.set_xticks(range(len(x))); ax.set_xticklabels([str(v) for v in x], rotation=35, ha="right")
+            ax.set_yticks(range(len(y))); ax.set_yticklabels([str(v) for v in y])
+            mfig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        elif first_type == "pie":
+            labels = [str(v) for v in traces[0].labels]
+            values = [float(v) for v in traces[0].values]
+            ax.pie(values, labels=labels, autopct=lambda p: f"{p:.0f}%" if p >= 4 else "")
+            ax.axis("equal")
+        elif first_type == "treemap":
+            labels = [str(v) for v in traces[0].labels]
+            values = [float(v) for v in traces[0].values]
+            pairs = sorted(zip(labels, values), key=lambda x: x[1], reverse=True)[:15]
+            ax.barh([p[0] for p in pairs][::-1], [p[1] for p in pairs][::-1])
+            ax.set_xlabel("Count")
+        elif first_type == "scatter":
+            for tr in traces:
+                x = list(tr.x) if tr.x is not None else []
+                y = list(tr.y) if tr.y is not None else []
+                mode = str(getattr(tr, "mode", "") or "")
+                name = str(getattr(tr, "name", "") or "")
+                if "lines" in mode:
+                    ax.plot(x, y, marker="o", label=name if name else None)
+                else:
+                    size = getattr(getattr(tr, "marker", None), "size", None)
+                    if size is None:
+                        ax.scatter(x, y, label=name if name else None)
+                    else:
+                        sizes = np.array(size, dtype=float)
+                        ax.scatter(x, y, s=np.maximum(sizes, 20), alpha=0.75, label=name if name else None)
+        else:
+            # Bar fallback supports stacked/grouped Plotly Express bars.
+            horizontal = False
+            try:
+                horizontal = str(getattr(traces[0], "orientation", "") or "").lower() == "h"
+            except Exception:
+                horizontal = False
+            if horizontal:
+                labels = [str(v) for v in traces[0].y]
+                left = np.zeros(len(labels))
+                for tr in traces:
+                    vals = np.array(tr.x, dtype=float)
+                    ax.barh(labels, vals, left=left, label=str(getattr(tr, "name", "") or ""))
+                    left += vals
+            else:
+                labels = [str(v) for v in traces[0].x]
+                bottom = np.zeros(len(labels))
+                for tr in traces:
+                    vals = np.array(tr.y, dtype=float)
+                    ax.bar(labels, vals, bottom=bottom, label=str(getattr(tr, "name", "") or ""))
+                    bottom += vals
+                ax.tick_params(axis="x", rotation=35)
+        if title:
+            ax.set_title(title)
+        try:
+            if any(str(getattr(t, "name", "") or "") for t in traces):
+                ax.legend(loc="best", fontsize=8)
+        except Exception:
+            pass
+        mfig.tight_layout()
+        buf = io.BytesIO()
+        mfig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
+        plt.close(mfig)
+        buf.seek(0)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def _figure_to_png_bytes(fig):
+    try:
+        return pio.to_image(_polish_figure(fig), format="png", width=1200, height=720, scale=2)
+    except Exception:
+        return _matplotlib_figure_to_png_bytes(fig)
+
+
+# --- V37 structured report, dynamic filename, and methodology sections --------
+def _clean_report_text(value, default="Unknown"):
+    try:
+        text = str(value).strip()
+    except Exception:
+        text = ""
+    if not text or text.lower() in ["none", "nan", "null"]:
+        return default
+    # OSM display names can be very long. Keep the city/study-area readable.
+    if "," in text and len(text) > 70:
+        text = text.split(",")[0].strip()
+    return text
+
+
+def _report_study_area_name(tables=None):
+    for key in ["area_name", "osm_place_query", "selected_city_name", "city_name"]:
+        try:
+            val = st.session_state.get(key, None)
+            if val:
+                return _clean_report_text(val, "Study Area")
+        except Exception:
+            pass
+    try:
+        density = (tables or {}).get("Crash density results")
+        if density is not None and "City" in density.columns:
+            vals = density["City"].dropna().astype(str).unique().tolist()
+            vals = [v for v in vals if v and v.lower() not in ["nan", "none"]]
+            if vals:
+                return _clean_report_text(vals[0], "Study Area")
+    except Exception:
+        pass
+    return "Study Area"
+
+
+def _report_analysis_type(tables=None):
+    try:
+        val = st.session_state.get("analysis_type", None)
+        if val:
+            return _clean_report_text(val, "Safety Analysis")
+    except Exception:
+        pass
+    try:
+        density = (tables or {}).get("Crash density results")
+        if density is not None and "UnitType" in density.columns:
+            vals = density["UnitType"].dropna().astype(str).unique().tolist()
+            if vals:
+                return _clean_report_text(vals[0], "Safety Analysis")
+    except Exception:
+        pass
+    return "Safety Analysis"
+
+
+def _report_unit_phrase(tables=None):
+    atype = _report_analysis_type(tables).lower()
+    if "intersection" in atype:
+        return "signalized intersection"
+    if "corridor" in atype:
+        return "corridor"
+    if "segment" in atype or "road" in atype:
+        return "road segment"
+    return "spatial unit"
+
+
+def _report_title(tables=None):
+    city = _report_study_area_name(tables)
+    unit = _report_unit_phrase(tables)
+    if unit == "signalized intersection":
+        return f"{city} Signalized Intersection Safety Analysis Report"
+    if unit == "corridor":
+        return f"{city} Corridor Safety Analysis Report"
+    if unit == "road segment":
+        return f"{city} Road Segment Safety and HIN Screening Report"
+    return f"{city} Safety Analysis Report"
+
+
+def _report_docx_filename(tables=None):
+    name = _report_title(tables).lower()
+    safe = "".join(ch if ch.isalnum() else "_" for ch in name)
+    safe = "_".join([part for part in safe.split("_") if part])
+    return f"{safe}.docx"
+
+
+def _report_user_email():
+    for key in ["user_email", "auth_email", "auth_user"]:
+        try:
+            val = st.session_state.get(key, None)
+            if val:
+                return _clean_report_text(val, "Not available")
+        except Exception:
+            pass
+    return "Not available"
+
+
+def _road_source_for_report():
+    try:
+        val = st.session_state.get("road_source_label", None)
+        if val:
+            return str(val)
+    except Exception:
+        pass
+    if st.session_state.get("osm_raw_roads") is not None:
+        return "OSM roads downloaded from OpenStreetMap"
+    if st.session_state.get("tiger_roads_file") is not None:
+        return "TIGER roads + PLACE boundary"
+    if st.session_state.get("selected_roads") is not None:
+        return "Uploaded/custom or previously prepared road network"
+    return "Not available"
+
+
+def _signal_source_for_report():
+    try:
+        val = st.session_state.get("signal_source_label", None)
+        if val:
+            return str(val)
+    except Exception:
+        pass
+    sigs = st.session_state.get("signals_clean", None)
+    if sigs is not None and not getattr(sigs, "empty", True):
+        return "OSM traffic signals or uploaded signal points"
+    return "Not available / not used"
+
+
+def _crash_source_for_report(crashes=None):
+    try:
+        val = st.session_state.get("crash_source_label", None)
+        if val:
+            return str(val)
+    except Exception:
+        pass
+    if crashes is not None and _is_fars_fatal_only_dataset(crashes):
+        return "FARS Accident CSV fatal-crash data"
+    if crashes is not None and not getattr(crashes, "empty", True):
+        return "Uploaded crash file"
+    return "Not available"
+
+
+def _filter_summary_for_report():
+    parts = []
+    try:
+        road_col = st.session_state.get("analysis_road_class_col", None)
+        road_vals = st.session_state.get("analysis_road_class_values", None)
+        if road_col and road_vals:
+            parts.append(f"Road class filter: {road_col} in {list(road_vals)}")
+    except Exception:
+        pass
+    try:
+        mapping = st.session_state.get("crash_field_mapping", None)
+        if mapping:
+            used = {k: v for k, v in dict(mapping).items() if v}
+            if used:
+                parts.append("Confirmed crash field mapping was used for dashboard and report summaries.")
+    except Exception:
+        pass
+    return parts or ["No optional filters were documented in the dashboard session."]
+
+
+def _add_key_value_table(doc, rows):
+    table = doc.add_table(rows=1, cols=2)
+    table.style = "Table Grid"
+    table.rows[0].cells[0].text = "Item"
+    table.rows[0].cells[1].text = "Description"
+    for k, v in rows:
+        cells = table.add_row().cells
+        cells[0].text = str(k)
+        cells[1].text = str(v)
+    return table
+
+
+def _add_dataframe_table(doc, df, max_rows=20):
+    table_df = _safe_dataframe_for_display(df.head(max_rows).copy())
+    if table_df.empty:
+        return False
+    table = doc.add_table(rows=1, cols=len(table_df.columns))
+    table.style = "Table Grid"
+    for i, col in enumerate(table_df.columns):
+        table.rows[0].cells[i].text = str(col)
+    for _, row in table_df.iterrows():
+        cells = table.add_row().cells
+        for i, col in enumerate(table_df.columns):
+            cells[i].text = str(row[col])
+    return True
+
+
+def _report_introduction_text(tables=None):
+    city = _report_study_area_name(tables)
+    unit = _report_unit_phrase(tables)
+    if unit == "signalized intersection":
+        return (
+            f"This report summarizes signalized-intersection safety conditions for {city}. "
+            "The analysis uses crash records assigned to signalized intersection spatial units and summarizes crash density, crash patterns, severity, and priority locations."
+        )
+    if unit == "corridor":
+        return (
+            f"This report summarizes corridor safety conditions for {city}. "
+            "The analysis uses road corridors defined from selected roads and traffic-signal context, assigns crashes to corridor spatial units, and summarizes crash density, severity, and priority corridors."
+        )
+    if unit == "road segment":
+        return (
+            f"This report summarizes road-segment safety conditions for {city}. "
+            "The analysis includes crash-density screening and, when Sliding Window/HIN results are available, HIN priority index results for identifying high-priority segments or windows."
+        )
+    return (
+        f"This report summarizes spatial-unit safety conditions for {city}. "
+        "It includes crash patterns, crash density, maps, and decision-ready priority tables from the dashboard."
+    )
+
+
+def _methodology_texts(tables=None):
+    unit = _report_unit_phrase(tables)
+    common = [
+        "Load or download the road network, study-area boundary, traffic-signal data when needed, and crash records.",
+        "Generate route mileposts using FromMile and ToMile so road segments and corridors have consistent linear reference fields.",
+        "Optionally filter the roadway network by road class/type before later steps. If a road-class filter is enabled, later spatial-unit creation uses the filtered road network.",
+        "Confirm crash field mapping so the dashboard and report use the correct crash ID, date/year, crash type, KABCO/severity, injury-count, and mode fields.",
+        "Optionally filter crashes by available attributes such as year, crash type, or severity before assigning them to spatial units.",
+    ]
+    if unit == "signalized intersection":
+        specific = [
+            "Generate or upload traffic-signal points. OSM signals are de-duplicated using the selected duplicate-distance threshold and snapped/filtered to nearby selected roads using the selected road-distance threshold.",
+            "Create signalized-intersection spatial units around cleaned signal points using the configured intersection buffer distance.",
+            "Spatially assign filtered crashes to the signalized-intersection units.",
+            "Calculate crash counts and crash density for each signalized intersection and prepare ranking tables and maps."
+        ]
+    elif unit == "corridor":
+        specific = [
+            "Generate or upload traffic-signal points and identify candidate corridor signals.",
+            "Build corridors from selected roads and nearby/associated signals using the configured minimum-signal, search-buffer, and corridor-width settings.",
+            "Allow corridor review and optional corridor dropping before final corridor spatial units are used.",
+            "Spatially assign filtered crashes to final corridor units and calculate crash counts and crash density for each corridor."
+        ]
+    elif unit == "road segment":
+        specific = [
+            "Create road-segment spatial units from uploaded/existing road segments, equal-length segments, or selected segment-generation settings.",
+            "Spatially assign filtered crashes to segment units and calculate crash count and crash density.",
+            "When Sliding Window/HIN is run, move a fixed-length analysis window along each route at the selected step length.",
+            "Score each window using the selected metric such as crash count or EPDO, then transfer the maximum overlapping window score to output segments/windows.",
+            "Rank segments/windows using the HIN priority index and selected threshold settings."
+        ]
+    else:
+        specific = [
+            "Create the selected spatial units, assign filtered crashes to those units, calculate crash density, and prepare dashboard results."
+        ]
+    return common + specific
+
+
+def _add_data_section(doc, tables, crashes):
+    doc.add_heading("Data", level=1)
+    roads = st.session_state.get("selected_roads", None)
+    signals = st.session_state.get("signals_clean", None)
+    density = tables.get("Crash density results")
+    rows = [
+        ("Road data", f"{_road_source_for_report()}; selected road features: {len(roads):,}" if roads is not None else _road_source_for_report()),
+        ("Signal data", f"{_signal_source_for_report()}; signal points: {len(signals):,}" if signals is not None and not getattr(signals, "empty", True) else _signal_source_for_report()),
+        ("Crash data", f"{_crash_source_for_report(crashes)}; records used: {len(crashes):,}" if crashes is not None else _crash_source_for_report(crashes)),
+        ("Spatial-unit results", f"{len(density):,} units with crash-density results" if density is not None else "Not available"),
+    ]
+    _add_key_value_table(doc, rows)
+    doc.add_paragraph("Required road fields depend on the selected method. Uploaded road networks should include valid line geometry, a route/name field, and a stable segment ID field. The app can auto-detect common fields but users should confirm route and ID fields when prompted.")
+    doc.add_paragraph("Uploaded signal data, if used, should include a signal ID field and latitude/longitude fields. OSM signal generation does not require an upload, but the result should be reviewed because OSM signal coverage varies by location.")
+    doc.add_paragraph("Uploaded crash data should include a crash/case ID, latitude, longitude, crash date or year, crash type or manner of collision, and severity/KABCO or injury-count fields. FARS Accident data is fatal-crash-only and uses the FARS fatality count field for total people killed.")
+    for item in _filter_summary_for_report():
+        doc.add_paragraph(item, style=None)
+
+
+def _add_methodology_section(doc, tables):
+    doc.add_heading("Methodology", level=1)
+    for i, text in enumerate(_methodology_texts(tables), start=1):
+        doc.add_paragraph(f"{i}. {text}")
+
+
+def _add_limitations_section(doc):
+    doc.add_heading("Limitations and data-quality notes", level=1)
+    notes = [
+        "OSM traffic-signal points are contributed data and may be incomplete, outdated, duplicated, or offset from the actual intersection location. Cleaned signal results should be reviewed before final use.",
+        "OSM road classifications are based on OSM highway tags, not necessarily an official functional-class system. Local agency roadway data is preferred when official classification is required.",
+        "TIGER roads provide broad coverage but may not include the same level of local roadway detail, lane information, or classification accuracy as agency-maintained centerlines.",
+        "Uploaded crash/FARS files vary by agency and format. The Crash Field Mapping panel should be confirmed so the app uses the correct ID, severity, crash type, date, and injury-count fields.",
+        "FARS Accident data includes fatal crashes only. It should not be interpreted as a complete all-crash dataset and does not support serious-injury crash totals from the Accident table alone.",
+        "Large datasets can exceed browser, memory, upload, or Streamlit Cloud limits. Large cities or statewide/national datasets should be clipped to the study area and simplified for map display before final dashboard/report export.",
+        "Crash-density and HIN results depend on the selected spatial-unit definition, filters, thresholds, crash geocoding accuracy, and roadway segmentation method. Results should be reviewed with engineering judgment."
+    ]
+    for note in notes:
+        doc.add_paragraph(note)
+
+
+def _add_bubble_size_note_if_needed(doc, figures):
+    titles = [t for t, _, _ in figures]
+    if any("bubble" in str(t).lower() for t in titles):
+        doc.add_paragraph(
+            "Travel mode severity bubble chart note: BubbleSize is calculated as 8 + 8 × sqrt(Count). "
+            "This square-root scaling keeps small mode/severity categories visible while still making larger categories appear larger. "
+            "The actual crash count is reported in the table and chart tooltip."
+        )
+
+
+def _export_dashboard_docx(tables, selected_blocks, selected_maps, extra_figures=None, maps=None, overlay_layers=None, report_timezone=None):
+    if Document is None:
+        return None
+    doc = Document()
+    title = _report_title(tables)
+    doc.add_heading(title, level=0)
+    doc.add_paragraph(f"Generated: {_report_time_text(report_timezone)}")
+    doc.add_paragraph(f"User email: {_report_user_email()}")
+
+    doc.add_heading("Introduction", level=1)
+    doc.add_paragraph(_report_introduction_text(tables))
+
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    _add_data_section(doc, tables, crashes)
+    _add_methodology_section(doc, tables)
+    _add_limitations_section(doc)
+
+    doc.add_heading("Results and visualization", level=1)
+    kpis = _summary_kpi_values(crashes)
+    doc.add_heading("Crash summary", level=2)
+    _add_key_value_table(doc, [(k, _format_kpi_value(v)) for k, v in kpis.items()])
+
+    figures = _build_default_figures(tables) + (extra_figures or [])
+    _add_bubble_size_note_if_needed(doc, figures)
+    for fig_title, fig, data in figures:
+        if selected_blocks and fig_title not in selected_blocks:
+            continue
+        doc.add_heading(str(fig_title), level=2)
+        img = _figure_to_png_bytes(_polish_figure(fig))
+        if img:
+            doc.add_picture(io.BytesIO(img), width=Inches(6.5))
+        else:
+            doc.add_paragraph("Chart image could not be generated in this environment. The summary table is included below.")
+        table_df = _safe_dataframe_for_display(data.copy())
+        if not table_df.empty:
+            doc.add_paragraph("Summary table")
+            _add_dataframe_table(doc, table_df, max_rows=20)
+
+    if selected_maps:
+        doc.add_heading("Selected map layers", level=2)
+        for m in selected_maps:
+            doc.add_heading(str(m), level=3)
+            if maps and m in maps:
+                map_png = _static_map_png(maps[m], str(m), overlay_layers=overlay_layers)
+                if map_png:
+                    doc.add_picture(io.BytesIO(map_png), width=Inches(6.5))
+                else:
+                    doc.add_paragraph("Static map image could not be generated.")
+            else:
+                doc.add_paragraph("Map layer selected in dashboard builder.")
+
+    doc.add_heading("Decision-ready result tables", level=2)
+    for table_name, df in _report_tables(tables).items():
+        doc.add_heading(str(table_name), level=3)
+        if not _add_dataframe_table(doc, df, max_rows=25):
+            doc.add_paragraph("No records available.")
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
