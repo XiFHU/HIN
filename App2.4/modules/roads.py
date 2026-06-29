@@ -504,14 +504,31 @@ def fetch_osm_roads_for_place(place_query, network_type="drive"):
     )
 
 
-def _osm_suggestion_search_requests(place_query, limit=8):
-    """Build generic Nominatim suggestion requests.
-
-    For city-only inputs, Nominatim's structured ``city=`` search is often
-    better than a plain q search.  This keeps the previous choose-from-dropdown
-    behavior while staying global.
-    """
+def _parse_osm_place_parts(place_query):
+    """Split user text into city/county/state/country-like parts."""
     raw = " ".join(str(place_query or "").replace("\n", " ").split()).strip()
+    parts = [
+        p.strip()
+        for p in raw.split(",")
+        if p.strip()
+    ]
+    return raw, parts
+
+
+def _osm_suggestion_search_requests(place_query, limit=20):
+    """Build global Nominatim suggestion requests.
+
+    Supports:
+    - City
+    - City, State
+    - City, Country
+    - City, State, Country
+    - City, County, State, Country
+
+    This does not assume Colorado or any default country.
+    """
+    raw, parts = _parse_osm_place_parts(place_query)
+
     if not raw:
         return []
 
@@ -520,26 +537,106 @@ def _osm_suggestion_search_requests(place_query, limit=8):
 
     def add(params):
         params = dict(params)
-        params.update({
-            "format": "jsonv2",
-            "addressdetails": 1,
-            "extratags": 1,
-            "namedetails": 1,
-            "dedupe": 1,
-            "limit": int(limit),
-        })
-        key = tuple(sorted((k, str(v)) for k, v in params.items()))
+
+        params.update(
+            {
+                "format": "jsonv2",
+                "addressdetails": 1,
+                "extratags": 1,
+                "namedetails": 1,
+                "dedupe": 0,
+                "limit": int(limit),
+                "accept-language": "en",
+            }
+        )
+
+        key = tuple(
+            sorted(
+                (k, str(v))
+                for k, v in params.items()
+            )
+        )
+
         if key not in seen:
             requests_out.append(params)
             seen.add(key)
 
+    # Free-form global search.
     for query in _osm_query_candidates(raw):
         add({"q": query})
 
-    # Structured search for short city-only input.  Do not add a state/country.
-    if "," not in raw:
-        add({"city": raw})
-        add({"city": raw.title()})
+    # Structured global search.
+    if len(parts) == 1:
+        city = parts[0]
+
+        add({"city": city})
+        add({"city": city.title()})
+
+    elif len(parts) == 2:
+        city = parts[0]
+        second = parts[1]
+
+        # Could be City, State.
+        add(
+            {
+                "city": city,
+                "state": second,
+            }
+        )
+
+        # Could be City, Country.
+        add(
+            {
+                "city": city,
+                "country": second,
+            }
+        )
+
+    elif len(parts) == 3:
+        city = parts[0]
+        second = parts[1]
+        third = parts[2]
+
+        # Usually City, State, Country.
+        add(
+            {
+                "city": city,
+                "state": second,
+                "country": third,
+            }
+        )
+
+        # Sometimes City, County, State.
+        add(
+            {
+                "city": city,
+                "county": second,
+                "state": third,
+            }
+        )
+
+    elif len(parts) >= 4:
+        city = parts[0]
+        county = parts[1]
+        state = parts[2]
+        country = parts[-1]
+
+        add(
+            {
+                "city": city,
+                "county": county,
+                "state": state,
+                "country": country,
+            }
+        )
+
+        add(
+            {
+                "city": city,
+                "state": state,
+                "country": country,
+            }
+        )
 
     return requests_out
 
@@ -555,58 +652,110 @@ def _format_osm_suggestion_label(item):
         or address.get("village")
         or address.get("municipality")
         or address.get("hamlet")
+        or address.get("locality")
         or item.get("name")
         or ""
     )
-    county = address.get("county") or address.get("state_district") or ""
-    state = address.get("state") or address.get("province") or address.get("region") or ""
+
+    county = (
+        address.get("county")
+        or address.get("state_district")
+        or address.get("district")
+        or ""
+    )
+
+    state = (
+        address.get("state")
+        or address.get("province")
+        or address.get("region")
+        or ""
+    )
+
     country = address.get("country") or ""
 
-    parts = [p for p in [city, county, state, country] if p]
+    osm_class = str(item.get("class", "")).strip()
+    osm_type = str(item.get("type", "")).strip()
+
+    parts = [
+        p for p in [
+            city,
+            county,
+            state,
+            country
+        ]
+        if p
+    ]
+
     compact = ", ".join(parts)
-    if compact and display_name and compact.lower() not in display_name.lower():
-        return f"{compact} — {display_name}"
-    return compact or display_name
+
+    type_text = ""
+    if osm_class or osm_type:
+        type_text = f" [{osm_class}/{osm_type}]".replace("[/", "[").replace("/]", "]")
+
+    if compact:
+        return f"{compact}{type_text}"
+
+    if display_name:
+        return f"{display_name}{type_text}"
+
+    return ""
 
 
-def suggest_osm_places(place_query, limit=8):
-    """Return candidate OSM/Nominatim place matches for a user-entered query.
+def suggest_osm_places(place_query, limit=20):
+    """Return candidate OSM/Nominatim place matches.
 
-    Users can type only a city name, then choose the intended city/county/state
-    or country from a dropdown.  The search is global and does not assume a
-    default state or country.
+    This is global and does not assume a default state/country.
+    It raises a useful error if requests/Nominatim fails.
     """
     if place_query is None or not str(place_query).strip():
         return []
 
     try:
         import requests
-    except Exception:
-        return []
+    except Exception as exc:
+        raise ImportError(
+            "The Python package 'requests' is required for OSM place search. "
+            "Please add 'requests' to requirements.txt."
+        ) from exc
 
     url = "https://nominatim.openstreetmap.org/search"
+
     headers = {
-        "User-Agent": "Corridor-HIN-Streamlit-App/1.0"
+        "User-Agent": "Corridor-HIN-Streamlit-App/1.0",
+        "Accept-Language": "en",
     }
 
     suggestions = []
     seen = set()
+    errors = []
 
-    for params in _osm_suggestion_search_requests(place_query, limit=limit):
+    for params in _osm_suggestion_search_requests(
+        place_query,
+        limit=limit
+    ):
         try:
             response = requests.get(
                 url,
                 params=params,
                 headers=headers,
-                timeout=20,
+                timeout=25,
             )
-            response.raise_for_status()
+
+            if response.status_code != 200:
+                errors.append(
+                    f"HTTP {response.status_code}: {response.text[:200]}"
+                )
+                continue
+
             data = response.json()
-        except Exception:
+
+        except Exception as exc:
+            errors.append(str(exc))
             continue
 
         for item in data:
             display_name = str(item.get("display_name", "")).strip()
+
             if not display_name:
                 continue
 
@@ -615,11 +764,14 @@ def suggest_osm_places(place_query, limit=8):
                 str(item.get("osm_id", "")),
                 display_name.lower(),
             )
+
             if key in seen:
                 continue
+
             seen.add(key)
 
             label = _format_osm_suggestion_label(item)
+
             suggestions.append(
                 {
                     "display_name": display_name,
@@ -636,8 +788,13 @@ def suggest_osm_places(place_query, limit=8):
         if len(suggestions) >= int(limit):
             break
 
-    return suggestions[:int(limit)]
+    if not suggestions and errors:
+        raise ValueError(
+            "OSM/Nominatim place search failed. Last error: "
+            + errors[-1]
+        )
 
+    return suggestions[:int(limit)]
 
 def apply_osm_highway_mapping(roads_gdf, highway_mapping):
     """Apply an OSM highway-to-functional-class mapping to roads."""
