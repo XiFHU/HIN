@@ -9,6 +9,7 @@ import io
 import re
 import html
 import base64
+import zipfile
 from datetime import datetime
 try:
     from zoneinfo import ZoneInfo
@@ -2355,7 +2356,7 @@ def _render_dashboard_builder(st, tables):
             help="Streamlit Cloud often runs in UTC. Choose the local project timezone so the report timestamp matches your expected local time.",
         )
         report_tz_value = None if report_timezone == "Local/server time" else report_timezone
-        d1, d2 = st.columns(2)
+        d1, d2, d3 = st.columns(3)
         with d1:
             png_bytes = _export_summary_image(tables, "png", extra_figures=custom_figures)
             if png_bytes:
@@ -3374,7 +3375,7 @@ def _render_dashboard_builder(st, tables):
         st.caption("Export the dashboard as a static PNG summary or a Word report with charts, map summaries, and decision-ready tables.")
         report_timezone = st.selectbox("Report time zone", ["America/Denver", "Local/server time", "UTC", "America/Chicago", "America/Los_Angeles", "America/New_York"], index=0, key="dashboard_report_timezone", help="Streamlit Cloud often runs in UTC. Choose the local project timezone so the report timestamp matches your expected local time.")
         report_tz_value = None if report_timezone == "Local/server time" else report_timezone
-        d1, d2 = st.columns(2)
+        d1, d2, d3 = st.columns(3)
         with d1:
             png_bytes = _export_summary_image(tables, "png", extra_figures=custom_figures)
             if png_bytes:
@@ -3387,6 +3388,19 @@ def _render_dashboard_builder(st, tables):
                 st.download_button("Download Word report", data=docx_bytes, file_name=_report_docx_filename(tables), mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="dash_export_docx")
             else:
                 st.info("Install python-docx for Word export.")
+        with d3:
+            data_zip_bytes = _download_generated_data_zip(st, tables)
+            if data_zip_bytes:
+                st.download_button(
+                    "Download all generated data ZIP",
+                    data=data_zip_bytes,
+                    file_name="hin_generated_data_export.zip",
+                    mime="application/zip",
+                    key="dash_export_generated_data_zip",
+                    help="Exports workflow-generated tables and GIS layers as CSV and GeoJSON files. This does not change analysis results.",
+                )
+            else:
+                st.caption("Run workflow steps before exporting data.")
 
     st.markdown("<div class='dashboard-section-title'>Generated dashboard</div>", unsafe_allow_html=True)
     chart_titles = set(selected_blocks)
@@ -5052,3 +5066,3000 @@ def _export_dashboard_docx(tables, selected_blocks, selected_maps, extra_figures
     doc.save(buffer)
     buffer.seek(0)
     return buffer.getvalue()
+
+
+# --- Dashboard-only HIN visualization and summary additions ------------------
+# These overrides add dashboard cards, plots, map choices, and report-table
+# columns. They do not change any workflow calculation or stored analysis result.
+
+def _dashboard_year_count(crashes):
+    """Return number of crash years for annualized dashboard rates."""
+    try:
+        years = _year_series_from_crashes(crashes)
+        if years is None:
+            return 1.0
+        vals = pd.to_numeric(years, errors="coerce").dropna()
+        if vals.empty:
+            return 1.0
+        return float(max(int(vals.max()) - int(vals.min()) + 1, 1))
+    except Exception:
+        return 1.0
+
+
+def _dashboard_length_col(df):
+    return _normal_col(
+        df,
+        [
+            "Length_Miles",
+            "Length_Mi",
+            "SegmentLength_Mile",
+            "WindowLength_Miles",
+            "CorridorLength_Mile",
+            "CorridorLength_Miles",
+            "length_mi",
+            "Miles",
+        ],
+    )
+
+
+def _dashboard_hin_metric(hin):
+    if hin is None or getattr(hin, "empty", True):
+        return None
+    if "HIN_Priority_Index" in hin.columns:
+        return "HIN_Priority_Index"
+    return _default_metric(_numeric_cols(hin))
+
+
+def _hin_ka_series(df):
+    """Return a row-level K+A/KSI series when available in HIN-style tables."""
+    if df is None or getattr(df, "empty", True):
+        return pd.Series(dtype="float64")
+
+    combined_candidates = [
+        "KA_Crashes",
+        "K_A_Crashes",
+        "KSI_Count",
+        "KSI_Crashes",
+        "Fatal_Injury_Count",
+        "FatalAndSeriousInjuryCrashes",
+        "Fatal_Serious_Injury_Count",
+        "Fatal_Serious_Crashes",
+    ]
+    for col in combined_candidates:
+        if col in df.columns:
+            return pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    k_col = _normal_col(
+        df,
+        [
+            "K_Crashes",
+            "K_Count",
+            "Fatal_Crashes",
+            "FatalCrashCount",
+            "Fatal_Count",
+        ],
+    )
+    a_col = _normal_col(
+        df,
+        [
+            "A_Crashes",
+            "A_Count",
+            "Serious_Injury_Crashes",
+            "SeriousInjuryCrashCount",
+            "Serious_Injury_Count",
+        ],
+    )
+    if k_col or a_col:
+        k = pd.to_numeric(df[k_col], errors="coerce").fillna(0) if k_col else 0
+        a = pd.to_numeric(df[a_col], errors="coerce").fillna(0) if a_col else 0
+        return k + a
+
+    return pd.Series([0] * len(df), index=df.index, dtype="float64")
+
+
+def _total_ka_from_crashes(crashes):
+    if crashes is None or getattr(crashes, "empty", True):
+        return 0
+    try:
+        sev_cols = _severity_count_columns(crashes)
+        if sev_cols:
+            k = pd.to_numeric(crashes[sev_cols.get("K")], errors="coerce").fillna(0).sum() if sev_cols.get("K") else 0
+            a = pd.to_numeric(crashes[sev_cols.get("A")], errors="coerce").fillna(0).sum() if sev_cols.get("A") else 0
+            return int(k + a)
+        kabco = _kabco_col(crashes)
+        if kabco and kabco in crashes.columns:
+            vals = crashes[kabco].map(normalize_kabco_value).astype(str).str.upper()
+            return int(vals.isin(["K", "A"]).sum())
+    except Exception:
+        pass
+    return 0
+
+
+def _selected_hin_subset(hin, metric, method, top_percent=10.0, top_n=20, index_threshold=50.0):
+    """Select a dashboard HIN subset without altering workflow results."""
+    if hin is None or getattr(hin, "empty", True) or metric not in hin.columns:
+        return pd.DataFrame()
+    work = hin.copy()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+    length_col = _dashboard_length_col(work)
+    if length_col:
+        work[length_col] = pd.to_numeric(work[length_col], errors="coerce").fillna(0)
+    else:
+        length_col = "__unit_length__"
+        work[length_col] = 1.0
+    sorted_work = work.sort_values(metric, ascending=False).copy()
+    total_mi = float(sorted_work[length_col].sum()) if sorted_work[length_col].sum() else float(len(sorted_work))
+
+    if method == "Top percent of miles":
+        limit = total_mi * float(top_percent) / 100.0
+        selected = sorted_work[sorted_work[length_col].cumsum() <= limit].copy()
+        if selected.empty and not sorted_work.empty:
+            selected = sorted_work.head(1).copy()
+        return selected
+    if method == "Top number of segments/windows":
+        return sorted_work.head(int(top_n)).copy()
+    if method == "HIN index threshold":
+        return sorted_work[sorted_work[metric] >= float(index_threshold)].copy()
+    if method == "Above average HIN index":
+        avg = pd.to_numeric(sorted_work[metric], errors="coerce").mean()
+        return sorted_work[sorted_work[metric] >= avg].copy()
+    if method == "Above median HIN index":
+        med = pd.to_numeric(sorted_work[metric], errors="coerce").median()
+        return sorted_work[sorted_work[metric] >= med].copy()
+    return sorted_work.head(20).copy()
+
+
+def _add_dashboard_rate_columns(df, crashes=None):
+    """Add display-only crash/mile/year fields to a result copy."""
+    if df is None or getattr(df, "empty", True):
+        return df
+    out = df.copy()
+    length_col = _dashboard_length_col(out)
+    count_col = _crash_count_col(out)
+    years = _dashboard_year_count(crashes)
+    if length_col and count_col:
+        length = pd.to_numeric(out[length_col], errors="coerce").replace(0, pd.NA)
+        count = pd.to_numeric(out[count_col], errors="coerce").fillna(0)
+        out["Crash_per_Mile"] = (count / length).astype("float64").round(3)
+        out["Crash_per_Mile_per_Year"] = (count / length / years).astype("float64").round(3)
+    ka = _hin_ka_series(out)
+    if len(ka) == len(out) and length_col:
+        length = pd.to_numeric(out[length_col], errors="coerce").replace(0, pd.NA)
+        out["KA_Crashes"] = pd.to_numeric(ka, errors="coerce").fillna(0).round(3)
+        out["KA_per_Mile_per_Year"] = (pd.to_numeric(ka, errors="coerce").fillna(0) / length / years).astype("float64").round(3)
+    return out
+
+
+def _hin_distribution_figures(hin):
+    figures = []
+    metric = _dashboard_hin_metric(hin)
+    if hin is None or getattr(hin, "empty", True) or not metric:
+        return figures
+    work = _drop_geometry(hin).copy()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce")
+    work = work[work[metric].notna()].copy()
+    if work.empty:
+        return figures
+
+    fig = px.histogram(
+        work,
+        x=metric,
+        nbins=20,
+        title="HIN index distribution",
+        labels={metric: "HIN priority index"},
+    )
+    fig.update_layout(xaxis_title="HIN priority index", yaxis_title="Segment/window count")
+    figures.append(("HIN index distribution", _polish_figure(fig), work[[metric]].copy()))
+
+    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"])
+    length_col = _dashboard_length_col(work)
+    if route_col:
+        route_work = work.copy()
+        route_work[route_col] = route_work[route_col].fillna("Unknown").astype(str)
+        if length_col:
+            route_work[length_col] = pd.to_numeric(route_work[length_col], errors="coerce").fillna(0)
+            route_summary = route_work.groupby(route_col, dropna=False).agg(
+                Mean_HIN=(metric, "mean"),
+                Max_HIN=(metric, "max"),
+                Segment_Count=(metric, "size"),
+                Miles=(length_col, "sum"),
+            ).reset_index()
+        else:
+            route_summary = route_work.groupby(route_col, dropna=False).agg(
+                Mean_HIN=(metric, "mean"),
+                Max_HIN=(metric, "max"),
+                Segment_Count=(metric, "size"),
+            ).reset_index()
+        route_summary = route_summary.sort_values("Mean_HIN", ascending=False).head(15)
+        if not route_summary.empty:
+            fig = px.bar(
+                route_summary.sort_values("Mean_HIN", ascending=True),
+                y=route_col,
+                x="Mean_HIN",
+                orientation="h",
+                hover_data=[c for c in ["Max_HIN", "Segment_Count", "Miles"] if c in route_summary.columns],
+                title="Average HIN index by route",
+            )
+            fig.update_layout(yaxis_title="Route", xaxis_title="Average HIN priority index")
+            figures.append(("Average HIN index by route", _polish_figure(fig), route_summary))
+    return figures
+
+
+def _hin_ka_bubble_figure(hin):
+    metric = _dashboard_hin_metric(hin)
+    if hin is None or getattr(hin, "empty", True) or not metric:
+        return None, pd.DataFrame()
+    work = _drop_geometry(hin).copy()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+    count_col = _crash_count_col(work)
+    if count_col:
+        work["Total_Crashes"] = pd.to_numeric(work[count_col], errors="coerce").fillna(0)
+    else:
+        work["Total_Crashes"] = 0
+    work["KA_Crashes"] = pd.to_numeric(_hin_ka_series(work), errors="coerce").fillna(0)
+    if work["KA_Crashes"].sum() <= 0:
+        return None, pd.DataFrame()
+    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"])
+    id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
+    if id_col is None:
+        id_col = "DashboardUnitID"
+        work[id_col] = [f"HIN_{i + 1}" for i in range(len(work))]
+    color_col = None
+    if route_col and work[route_col].nunique(dropna=True) <= 15:
+        color_col = route_col
+    hover_cols = [c for c in [id_col, route_col, _dashboard_length_col(work), "Total_Crashes", "KA_Crashes"] if c and c in work.columns]
+    fig = px.scatter(
+        work,
+        x=metric,
+        y="KA_Crashes",
+        size="Total_Crashes" if work["Total_Crashes"].sum() > 0 else None,
+        color=color_col,
+        hover_data=hover_cols,
+        size_max=42,
+        title="K+A crashes vs HIN priority index",
+    )
+    fig.update_traces(marker=dict(sizemin=6, opacity=0.78, line=dict(width=1, color="white")))
+    fig.update_layout(xaxis_title="HIN priority index", yaxis_title="K+A / KSI crashes")
+    return _polish_figure(fig), work
+
+
+def _render_hin_dashboard_charts(st, hin):
+    if hin is None or getattr(hin, "empty", True):
+        return
+    st.markdown("<div class='dashboard-section-title'>HIN index diagnostics <span>distribution, route patterns, and severity relationship</span></div>", unsafe_allow_html=True)
+    figures = _hin_distribution_figures(hin)
+    bubble_fig, bubble_df = _hin_ka_bubble_figure(hin)
+    if not figures and bubble_fig is None:
+        st.info("HIN diagnostic charts need HIN priority index values and, for the bubble chart, available K+A/KSI fields.")
+        return
+    cols = st.columns(2)
+    chart_items = figures[:]
+    if bubble_fig is not None:
+        chart_items.append(("K+A crashes vs HIN priority index", bubble_fig, bubble_df))
+    for i, (title, fig, data) in enumerate(chart_items[:4]):
+        with cols[i % 2]:
+            fig.update_layout(height=_chart_height(), margin=dict(l=20, r=20, t=45, b=35))
+            st.plotly_chart(_polish_figure(fig), width="stretch", key=f"hin_diag_{_safe_name(title)}_{i}")
+
+
+def _render_hin_network_summary(st, hin, crashes):
+    """Dashboard-only HIN summary with custom threshold and K+A card."""
+    if hin is None or getattr(hin, "empty", True):
+        return
+    metric = _dashboard_hin_metric(hin)
+    if not metric:
+        return
+
+    st.markdown("<div class='dashboard-section-title'>High Injury Network summary <span>custom HIN threshold, miles, crashes, and K+A/KSI capture</span></div>", unsafe_allow_html=True)
+    work = hin.copy()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+    length_col = _dashboard_length_col(work)
+    if length_col:
+        work[length_col] = pd.to_numeric(work[length_col], errors="coerce").fillna(0)
+    else:
+        length_col = "__unit_length__"
+        work[length_col] = 1.0
+
+    mode_col, control_col, c_miles, c_crashes, c_ka = st.columns([1.35, 1.05, 1, 1, 1])
+    method = mode_col.selectbox(
+        "High-risk network threshold",
+        [
+            "Top percent of miles",
+            "Top number of segments/windows",
+            "HIN index threshold",
+            "Above average HIN index",
+            "Above median HIN index",
+        ],
+        index=0,
+        key="hin_summary_threshold_mode_v38",
+    )
+
+    top_percent = 10.0
+    top_n = 20
+    index_threshold = 50.0
+    with control_col:
+        if method == "Top percent of miles":
+            top_percent = st.number_input(
+                "Top percent",
+                min_value=1.0,
+                max_value=100.0,
+                value=float(st.session_state.get("hin_summary_top_percent", 10.0)),
+                step=1.0,
+                key="hin_summary_top_percent",
+            )
+        elif method == "Top number of segments/windows":
+            top_n = st.number_input(
+                "Top N",
+                min_value=1,
+                max_value=max(int(len(work)), 1),
+                value=min(20, max(int(len(work)), 1)),
+                step=1,
+                key="hin_summary_top_n",
+            )
+        elif method == "HIN index threshold":
+            index_threshold = st.number_input(
+                "Minimum HIN index",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(st.session_state.get("hin_summary_index_threshold", 50.0)),
+                step=5.0,
+                key="hin_summary_index_threshold",
+            )
+        elif method == "Above average HIN index":
+            st.metric("Average", f"{work[metric].mean():,.2f}")
+        elif method == "Above median HIN index":
+            st.metric("Median", f"{work[metric].median():,.2f}")
+
+    selected = _selected_hin_subset(
+        work,
+        metric,
+        method,
+        top_percent=top_percent,
+        top_n=top_n,
+        index_threshold=index_threshold,
+    )
+
+    total_mi = float(work[length_col].sum()) if work[length_col].sum() else float(len(work))
+    high_mi = float(selected[length_col].sum()) if not selected.empty else 0.0
+    pct_mi = high_mi / total_mi * 100 if total_mi else 0.0
+
+    count_col = _crash_count_col(work)
+    total_crashes = int(pd.to_numeric(work[count_col], errors="coerce").fillna(0).sum()) if count_col else (len(crashes) if crashes is not None else 0)
+    high_crashes = int(pd.to_numeric(selected[count_col], errors="coerce").fillna(0).sum()) if count_col and not selected.empty else 0
+    pct_crash = high_crashes / total_crashes * 100 if total_crashes else 0.0
+
+    total_ka_series = _hin_ka_series(work)
+    selected_ka_series = _hin_ka_series(selected)
+    total_ka = int(pd.to_numeric(total_ka_series, errors="coerce").fillna(0).sum()) if len(total_ka_series) else _total_ka_from_crashes(crashes)
+    high_ka = int(pd.to_numeric(selected_ka_series, errors="coerce").fillna(0).sum()) if len(selected_ka_series) else 0
+    pct_ka = high_ka / total_ka * 100 if total_ka else 0.0
+
+    c_miles.metric("High-risk miles", f"{high_mi:,.2f} mi", f"{pct_mi:,.1f}% of analyzed miles")
+    c_crashes.metric("Crashes on selected HIN", f"{high_crashes:,}", f"{pct_crash:,.1f}% of assigned crashes")
+    c_ka.metric("K+A / KSI on selected HIN", f"{high_ka:,}", f"{pct_ka:,.1f}% of K+A/KSI")
+
+    selected_display = _add_dashboard_rate_columns(selected, crashes=crashes)
+    with st.expander("Selected HIN summary rows", expanded=False):
+        preview_cols = []
+        for c in [
+            _normal_col(selected_display, ["RiskSegmentID", "WindowID", "SegmentID", "UnitID", "CorridorID"]),
+            _normal_col(selected_display, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"]),
+            _dashboard_length_col(selected_display),
+            _crash_count_col(selected_display),
+            "KA_Crashes",
+            metric,
+            "Crash_per_Mile_per_Year",
+            "KA_per_Mile_per_Year",
+        ]:
+            if c and c in selected_display.columns and c not in preview_cols:
+                preview_cols.append(c)
+        if preview_cols:
+            st.dataframe(_safe_dataframe_for_display(selected_display[preview_cols].head(50)), width="stretch", hide_index=True)
+        else:
+            st.info("No displayable HIN rows are available for the selected threshold.")
+
+    st.caption("These dashboard controls only summarize and visualize the existing HIN results. They do not recalculate HIN scores or change workflow outputs.")
+    _render_hin_dashboard_charts(st, hin)
+
+
+def _hin_table_for_display(hin, metric, top_n=20):
+    """Decision table for top HIN windows/segments with display-only rates."""
+    if hin is None or getattr(hin, "empty", True) or metric not in hin.columns:
+        return pd.DataFrame()
+    crashes = None
+    try:
+        crashes = _available_tables(st).get("Assigned crashes", _available_tables(st).get("Uploaded crashes"))
+    except Exception:
+        crashes = None
+    work = _add_dashboard_rate_columns(hin.copy(), crashes=crashes)
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+    work = work.sort_values(metric, ascending=False).head(top_n).reset_index(drop=True)
+
+    id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
+    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "CorridorRoute", "RouteName_Calc", "Name"])
+    length_col = _dashboard_length_col(work)
+    from_col = _normal_col(work, ["FromMile", "From_Mile", "from_mile", "BeginMile", "StartMile", "WindowFromMile"])
+    to_col = _normal_col(work, ["ToMile", "To_Mile", "to_mile", "EndMile", "WindowToMile"])
+    count_col = _crash_count_col(work)
+
+    out = pd.DataFrame()
+    out["Rank"] = range(1, len(work) + 1)
+    out["SegID"] = work[id_col].astype(str).values if id_col else [f"HIN_{i + 1}" for i in range(len(work))]
+    out["Seg/window length"] = pd.to_numeric(work[length_col], errors="coerce").round(3).values if length_col else ""
+    out["From mile"] = pd.to_numeric(work[from_col], errors="coerce").round(3).values if from_col else ""
+    out["To mile"] = pd.to_numeric(work[to_col], errors="coerce").round(3).values if to_col else ""
+    out["Route"] = work[route_col].astype(str).values if route_col else ""
+    out["Crash count"] = pd.to_numeric(work[count_col], errors="coerce").fillna(0).round(0).astype(int).values if count_col else ""
+    out["K+A / KSI crashes"] = pd.to_numeric(work["KA_Crashes"], errors="coerce").fillna(0).round(0).astype(int).values if "KA_Crashes" in work.columns else ""
+    out["HIN index"] = pd.to_numeric(work[metric], errors="coerce").round(3).values
+    if "Crash_per_Mile" in work.columns:
+        out["Crashes/mile"] = pd.to_numeric(work["Crash_per_Mile"], errors="coerce").round(3).values
+    if "Crash_per_Mile_per_Year" in work.columns:
+        out["Crashes/mile/year"] = pd.to_numeric(work["Crash_per_Mile_per_Year"], errors="coerce").round(3).values
+    if "KA_per_Mile_per_Year" in work.columns:
+        out["K+A/mile/year"] = pd.to_numeric(work["KA_per_Mile_per_Year"], errors="coerce").round(3).values
+    return out
+
+
+def _top_density_export_table(density, top_n=20):
+    """Decision-ready crash-density table with display-only rate columns."""
+    if density is None or getattr(density, "empty", True):
+        return pd.DataFrame()
+    crashes = None
+    try:
+        crashes = _available_tables(st).get("Assigned crashes", _available_tables(st).get("Uploaded crashes"))
+    except Exception:
+        crashes = None
+    df = _add_dashboard_rate_columns(_drop_geometry(density).copy(), crashes=crashes)
+    unit_col = _unit_col(df) or _normal_col(df, ["UnitID", "IntersectionID", "CorridorID", "SegmentID", "Route"])
+    unit_type_col = _normal_col(df, ["UnitType", "IntersectionType", "CorridorType", "SegmentType"])
+    city_col = _normal_col(df, ["City", "city_name"])
+    length_col = _dashboard_length_col(df)
+    count_col = _crash_count_col(df)
+    density_col = _normal_col(df, ["CrashDensity", "Crash_Density", "crash_density"])
+    if density_col is None:
+        density_col = _default_metric(_numeric_cols(df))
+    if density_col:
+        df[density_col] = pd.to_numeric(df[density_col], errors="coerce").fillna(0)
+        df = df.sort_values(density_col, ascending=False)
+    use = df.head(top_n).reset_index(drop=True)
+    out = pd.DataFrame({"Rank": range(1, len(use) + 1)})
+    out["Spatial unit id"] = use[unit_col].astype(str) if unit_col else use.index.astype(str)
+    out["Unit type"] = use[unit_type_col].astype(str) if unit_type_col else ""
+    out["City"] = use[city_col].astype(str) if city_col else ""
+    out["Length_mi"] = pd.to_numeric(use[length_col], errors="coerce").round(3) if length_col else ""
+    road1_col = _normal_col(use, ["RoadName1", "Road1", "Route1", "Street1", "FromRoad"])
+    road2_col = _normal_col(use, ["RoadName2", "Road2", "Route2", "Street2", "ToRoad"])
+    route_col = _normal_col(use, ["Route", "FULLNAME", "RoadName", "RouteName", "CorridorRoute", "RouteName_Calc"])
+    if road1_col and road2_col:
+        out["Road 1"] = use[road1_col].astype(str)
+        out["Road 2"] = use[road2_col].astype(str)
+    elif route_col:
+        out["Route name"] = use[route_col].astype(str)
+    out["Crash count"] = pd.to_numeric(use[count_col], errors="coerce").fillna(0).astype(int) if count_col else ""
+    out["Crash density"] = pd.to_numeric(use[density_col], errors="coerce").round(3) if density_col else ""
+    for src, label in [
+        ("Crash_per_Mile", "Crashes/mile"),
+        ("Crash_per_Mile_per_Year", "Crashes/mile/year"),
+        ("KA_per_Mile_per_Year", "K+A/mile/year"),
+    ]:
+        if src in use.columns:
+            out[label] = pd.to_numeric(use[src], errors="coerce").round(3)
+    return out
+
+
+def _export_tables_only(tables, top_n=20):
+    """Report-ready tables with dashboard-only rate columns."""
+    out = {}
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    density = tables.get("Crash density results")
+    hin = tables.get("HIN risk segments", tables.get("HIN corridors"))
+    if crashes is not None:
+        type_col = _crash_type_col(crashes)
+        if type_col:
+            out["Crash type summary"] = _aggregate(crashes, type_col, None, "Count", top_n)
+        years = _year_series_from_crashes(crashes)
+        if years is not None:
+            ydf = pd.DataFrame({"Year": years})
+            ydf = ydf[ydf["Year"].ne("Unknown")]
+            out["Crash year summary"] = ydf.groupby("Year", dropna=False).size().reset_index(name="Count").sort_values("Year")
+        sev = _spatial_unit_severity_table(tables, top_n=top_n)
+        if not sev.empty:
+            out["Severity summary by spatial unit"] = sev
+    if density is not None:
+        top_density = _top_density_export_table(density, top_n=top_n)
+        if not top_density.empty:
+            out["Top crash-density spatial units"] = top_density
+    if hin is not None:
+        metric = _dashboard_hin_metric(hin)
+        top_hin = _hin_table_for_display(hin, metric, top_n) if metric else pd.DataFrame()
+        if not top_hin.empty:
+            out["Top HIN/risk spatial units"] = top_hin
+    return {name: _safe_dataframe_for_display(df) for name, df in out.items()}
+
+
+def _available_maps(st):
+    """Dashboard map layers, including display-only HIN threshold maps."""
+    maps = {}
+    density = st.session_state.get("spatial_units_density_map")
+    if density is not None and not getattr(density, "empty", True):
+        maps["Crash density map"] = _repair_gdf_crs(density, st)
+
+    results = st.session_state.get("section7_results")
+    if results is not None:
+        risk_segments = results.get("risk_segments")
+        if risk_segments is not None and not getattr(risk_segments, "empty", True):
+            hin_map = _repair_gdf_crs(risk_segments, st)
+            maps["HIN priority map"] = hin_map
+            metric = _dashboard_hin_metric(hin_map)
+            if metric:
+                work = hin_map.copy()
+                work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+                if not work.empty:
+                    avg = work[metric].mean()
+                    med = work[metric].median()
+                    maps["HIN above average map"] = work[work[metric] >= avg].copy()
+                    maps["HIN above median map"] = work[work[metric] >= med].copy()
+
+    corridors = st.session_state.get("final_corridors", st.session_state.get("corridors"))
+    if corridors is not None and not getattr(corridors, "empty", True):
+        maps["Corridor map"] = _repair_gdf_crs(corridors, st)
+
+    return {k: v for k, v in maps.items() if v is not None and not getattr(v, "empty", True)}
+
+
+def _build_default_figures(tables):
+    """Default dashboard/report figures with added HIN diagnostic charts."""
+    figures = []
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    density = tables.get("Crash density results")
+    hin = tables.get("HIN risk segments", tables.get("HIN corridors"))
+    if crashes is not None:
+        year_kabco, year_col, kabco_col = _year_kabco_table(crashes)
+        if not year_kabco.empty:
+            fig = px.bar(year_kabco, x=year_col, y="Count", color=kabco_col, color_discrete_map=KABCO_COLOR_MAP, category_orders={kabco_col: ["K", "A", "B", "C", "O"]}, title=f"Crashes by year and {kabco_col}")
+            fig.update_layout(barmode="stack", xaxis_title="Year", yaxis_title="Crash count")
+            figures.append((f"Crashes by year and {kabco_col}", _apply_kabco_trace_colors(_polish_figure(fig)), year_kabco))
+        type_col = _crash_type_col(crashes)
+        if type_col:
+            type_df = _aggregate(crashes, type_col, None, "Count", 12)
+            pie = px.pie(type_df, names=type_col, values="Count", hole=0.38, title=f"Crash type share by {type_col}")
+            figures.append((f"Crash type share by {type_col}", _polish_figure(pie), type_df))
+        monthly_df, period_col, value_col, color_col = _month_trend_table(crashes)
+        if not monthly_df.empty:
+            fig = px.line(monthly_df, x=period_col, y=value_col, color=color_col, markers=True, category_orders={period_col: MONTH_ORDER}, title="Monthly crash trend by year")
+            figures.append(("Monthly crash trend by year", _polish_figure(fig), monthly_df))
+        mode_df, mode_kabco_col, mode_col = _mode_severity_bubble_table(crashes)
+        if not mode_df.empty:
+            fig = px.scatter(mode_df, x=mode_kabco_col, y=mode_col, size="BubbleSize" if "BubbleSize" in mode_df.columns else "Count", color=mode_col, size_max=42, title="Travel mode severity bubble chart", hover_data={"Count": True})
+            fig.update_traces(marker=dict(sizemin=7, opacity=0.80, line=dict(width=1, color="white")))
+            figures.append(("Travel mode severity bubble chart", _polish_figure(fig), mode_df))
+        road_kabco, road_col, road_kabco_col = _road_class_kabco_table(crashes, st_obj=None)
+        if not road_kabco.empty:
+            tree = road_kabco.copy(); tree["All crashes"] = "All crashes"
+            fig = px.treemap(tree, path=["All crashes", road_col, road_kabco_col], values="Count", color=road_kabco_col, color_discrete_map=KABCO_COLOR_MAP, title=f"Road class and {road_kabco_col} treemap")
+            figures.append((f"Road class and {road_kabco_col} treemap", _polish_figure(fig), tree))
+        crash_kabco, crash_type_col, crash_kabco_col = _crash_type_kabco_table(crashes)
+        if not crash_kabco.empty:
+            pivot = crash_kabco.pivot_table(index=crash_type_col, columns=crash_kabco_col, values="Count", aggfunc="sum", fill_value=0)
+            fig = px.imshow(pivot, text_auto=True, aspect="auto", title=f"Crash type by {crash_kabco_col}", labels=dict(x=crash_kabco_col, y="Crash type", color="Crash count"), color_continuous_scale="YlOrRd")
+            figures.append((f"Crash type by {crash_kabco_col}", _polish_figure(fig), pivot.reset_index()))
+    if density is not None:
+        metric = "CrashDensity" if "CrashDensity" in density.columns else _default_metric(_numeric_cols(density))
+        rank_df, unit_col, value_col = _rank_units_for_chart(density, metric, 15) if metric else (pd.DataFrame(), None, None)
+        if not rank_df.empty:
+            plot_df = rank_df.sort_values(value_col, ascending=True)
+            fig = px.bar(plot_df, y=unit_col, x=value_col, orientation="h", hover_data=_context_cols_for_hover(plot_df), title="Top spatial units by crash density")
+            fig.update_layout(yaxis_title="Spatial unit ID", xaxis_title="Crash density")
+            figures.append(("Top spatial units by crash density", _polish_figure(fig), rank_df))
+    if hin is not None:
+        figures.extend(_hin_distribution_figures(hin))
+        bubble_fig, bubble_df = _hin_ka_bubble_figure(hin)
+        if bubble_fig is not None and not bubble_df.empty:
+            figures.append(("K+A crashes vs HIN priority index", bubble_fig, bubble_df))
+        metric = _dashboard_hin_metric(hin)
+        hin_table = _hin_table_for_display(hin, metric, 20) if metric else pd.DataFrame()
+        if not hin_table.empty:
+            fig = px.bar(hin_table.sort_values("HIN index", ascending=True), y="SegID", x="HIN index", orientation="h", title="Top HIN segments/windows by HIN priority index")
+            fig.update_layout(yaxis_title="SegID", xaxis_title="HIN priority index")
+            figures.append(("Top HIN segments/windows table", _polish_figure(fig), hin_table))
+    return figures
+
+
+# --- V39 dashboard-only additions: HIN summary map support, KSI mapping, route comparison, generated-data ZIP ---
+# Display/export helpers only. No workflow calculations are rerun or overwritten.
+
+
+def _dashboard_numeric_series(df, col):
+    if df is None or col is None or col not in df.columns:
+        return pd.Series([0] * (len(df) if df is not None else 0), index=(df.index if df is not None else None), dtype="float64")
+    return pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+
+def _dashboard_k_col(df):
+    return _normal_col(
+        df,
+        [
+            "K_Crashes", "K_Count", "Fatal_Crashes", "FatalCrashCount",
+            "Fatal_Count", "Fatal", "K", "KSI_K",
+        ],
+    )
+
+
+def _dashboard_a_col(df):
+    return _normal_col(
+        df,
+        [
+            "A_Crashes", "A_Count", "Serious_Injury_Crashes",
+            "SeriousInjuryCrashCount", "Serious_Injury_Count", "Serious_Injury",
+            "A", "KSI_A",
+        ],
+    )
+
+
+def _hin_ka_series(df):
+    """Return row-level KSI (K+A) values when available or mapped by the user.
+
+    This is dashboard-only. It does not recalculate or overwrite HIN outputs.
+    """
+    if df is None or getattr(df, "empty", True):
+        return pd.Series(dtype="float64")
+
+    combined_key = st.session_state.get("dashboard_ksi_combined_col")
+    k_key = st.session_state.get("dashboard_ksi_k_col")
+    a_key = st.session_state.get("dashboard_ksi_a_col")
+
+    if combined_key and combined_key in df.columns:
+        return _dashboard_numeric_series(df, combined_key)
+    if (k_key and k_key in df.columns) or (a_key and a_key in df.columns):
+        return _dashboard_numeric_series(df, k_key) + _dashboard_numeric_series(df, a_key)
+
+    combined_candidates = [
+        "KSI_Crashes", "KSI_Count", "KSI", "KA_Crashes", "K_A_Crashes",
+        "Fatal_Injury_Count", "FatalAndSeriousInjuryCrashes",
+        "Fatal_Serious_Injury_Count", "Fatal_Serious_Crashes",
+    ]
+    for col in combined_candidates:
+        if col in df.columns:
+            return _dashboard_numeric_series(df, col)
+
+    k_col = _dashboard_k_col(df)
+    a_col = _dashboard_a_col(df)
+    if k_col or a_col:
+        return _dashboard_numeric_series(df, k_col) + _dashboard_numeric_series(df, a_col)
+
+    return pd.Series([0] * len(df), index=df.index, dtype="float64")
+
+
+def _render_ksi_mapping_controls(st, df):
+    """Let users map K and A columns for dashboard KSI cards/charts only."""
+    if df is None or getattr(df, "empty", True):
+        return
+    numeric_cols = [c for c in df.columns if c != "geometry" and pd.api.types.is_numeric_dtype(pd.to_numeric(df[c], errors="coerce"))]
+    # Keep a less strict fallback for mixed numeric/object columns.
+    if not numeric_cols:
+        numeric_cols = [c for c in df.columns if c != "geometry"]
+    auto_ksi = _hin_ka_series(df)
+    with st.expander("KSI (K+A) crash field mapping for dashboard", expanded=(float(auto_ksi.sum()) <= 0 and len(df) > 0)):
+        st.caption("Use this only when the HIN result table already contains K, A, or combined KSI columns but the dashboard could not auto-detect them. This changes dashboard summaries only.")
+        options = [""] + list(numeric_cols)
+        combined_default = st.session_state.get("dashboard_ksi_combined_col", "")
+        k_default = st.session_state.get("dashboard_ksi_k_col", "")
+        a_default = st.session_state.get("dashboard_ksi_a_col", "")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.selectbox("Combined KSI (K+A) column", options, index=options.index(combined_default) if combined_default in options else 0, key="dashboard_ksi_combined_col")
+        with c2:
+            st.selectbox("K fatal crashes column", options, index=options.index(k_default) if k_default in options else 0, key="dashboard_ksi_k_col")
+        with c3:
+            st.selectbox("A serious injury crashes column", options, index=options.index(a_default) if a_default in options else 0, key="dashboard_ksi_a_col")
+
+
+def _add_dashboard_rate_columns(df, crashes=None):
+    """Add display-only crash/mile/year and KSI (K+A)/mile/year fields."""
+    if df is None or getattr(df, "empty", True):
+        return df
+    out = df.copy()
+    length_col = _dashboard_length_col(out)
+    count_col = _crash_count_col(out)
+    years = _dashboard_year_count(crashes)
+    out["Dashboard_Analysis_Years"] = years
+    if length_col and count_col:
+        length = pd.to_numeric(out[length_col], errors="coerce").replace(0, pd.NA)
+        count = pd.to_numeric(out[count_col], errors="coerce").fillna(0)
+        out["Crash_per_Mile"] = (count / length).astype("float64").round(3)
+        out["Crash_per_Mile_per_Year"] = (count / length / years).astype("float64").round(3)
+    ksi = _hin_ka_series(out)
+    if len(ksi) == len(out):
+        out["KSI_Crashes_Dashboard"] = pd.to_numeric(ksi, errors="coerce").fillna(0).round(3)
+        if length_col:
+            length = pd.to_numeric(out[length_col], errors="coerce").replace(0, pd.NA)
+            out["KSI_per_Mile_per_Year"] = (pd.to_numeric(ksi, errors="coerce").fillna(0) / length / years).astype("float64").round(3)
+    return out
+
+
+def _hin_distribution_figures(hin):
+    """HIN diagnostic figures: line distribution plus route mean/median comparison."""
+    figures = []
+    metric = _dashboard_hin_metric(hin)
+    if hin is None or getattr(hin, "empty", True) or not metric:
+        return figures
+    work = _drop_geometry(hin).copy()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce")
+    work = work[work[metric].notna()].copy()
+    if work.empty:
+        return figures
+
+    dist = work[[metric]].sort_values(metric).reset_index(drop=True)
+    if len(dist) == 1:
+        dist["Percentile"] = 100.0
+    else:
+        dist["Percentile"] = (dist.index + 1) / len(dist) * 100.0
+    fig = px.line(
+        dist,
+        x="Percentile",
+        y=metric,
+        markers=False,
+        title="HIN index distribution curve",
+        labels={"Percentile": "Segment/window percentile", metric: "HIN priority index"},
+    )
+    fig.update_layout(xaxis_title="Segment/window percentile", yaxis_title="HIN priority index")
+    figures.append(("HIN index distribution curve", _polish_figure(fig), dist))
+
+    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"])
+    length_col = _dashboard_length_col(work)
+    if route_col:
+        route_work = work.copy()
+        route_work[route_col] = route_work[route_col].fillna("Unknown").astype(str)
+        agg_kwargs = dict(
+            Average_HIN=(metric, "mean"),
+            Median_HIN=(metric, "median"),
+            Max_HIN=(metric, "max"),
+            Segment_Count=(metric, "size"),
+        )
+        if length_col:
+            route_work[length_col] = pd.to_numeric(route_work[length_col], errors="coerce").fillna(0)
+            agg_kwargs["Miles"] = (length_col, "sum")
+        route_summary = route_work.groupby(route_col, dropna=False).agg(**agg_kwargs).reset_index()
+        route_summary = route_summary.sort_values("Average_HIN", ascending=False).head(15)
+        if not route_summary.empty:
+            plot_df = route_summary.copy()
+            plot_df["Average_HIN_Left"] = -pd.to_numeric(plot_df["Average_HIN"], errors="coerce").fillna(0)
+            plot_df["Median_HIN_Right"] = pd.to_numeric(plot_df["Median_HIN"], errors="coerce").fillna(0)
+            plot_df = plot_df.sort_values("Average_HIN", ascending=True)
+            fig = px.bar(
+                plot_df,
+                y=route_col,
+                x=["Average_HIN_Left", "Median_HIN_Right"],
+                orientation="h",
+                barmode="relative",
+                hover_data=[c for c in ["Average_HIN", "Median_HIN", "Max_HIN", "Segment_Count", "Miles"] if c in plot_df.columns],
+                title="Average and median HIN index by route",
+            )
+            for trace in fig.data:
+                if trace.name == "Average_HIN_Left":
+                    trace.name = "Average HIN"
+                    trace.text = [f"{abs(v):.1f}" for v in trace.x]
+                elif trace.name == "Median_HIN_Right":
+                    trace.name = "Median HIN"
+                    trace.text = [f"{v:.1f}" for v in trace.x]
+                trace.textposition = "inside"
+            max_val = max(float(plot_df["Average_HIN"].max() or 0), float(plot_df["Median_HIN"].max() or 0), 1.0)
+            tick_vals = [-max_val, -max_val / 2, 0, max_val / 2, max_val]
+            fig.update_layout(
+                yaxis_title="Route",
+                xaxis_title="HIN priority index",
+                legend_title="Statistic",
+                bargap=0.25,
+                xaxis=dict(tickmode="array", tickvals=tick_vals, ticktext=[f"{abs(v):.0f}" for v in tick_vals]),
+            )
+            figures.append(("Average and median HIN index by route", _polish_figure(fig), route_summary))
+    return figures
+
+
+def _hin_ka_bubble_figure(hin):
+    metric = _dashboard_hin_metric(hin)
+    if hin is None or getattr(hin, "empty", True) or not metric:
+        return None, pd.DataFrame()
+    work = _drop_geometry(hin).copy()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+    count_col = _crash_count_col(work)
+    work["Total_Crashes"] = pd.to_numeric(work[count_col], errors="coerce").fillna(0) if count_col else 0
+    work["KSI_Crashes_Dashboard"] = pd.to_numeric(_hin_ka_series(work), errors="coerce").fillna(0)
+    if work["KSI_Crashes_Dashboard"].sum() <= 0:
+        return None, pd.DataFrame()
+    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"])
+    id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
+    if id_col is None:
+        id_col = "DashboardUnitID"
+        work[id_col] = [f"HIN_{i + 1}" for i in range(len(work))]
+    color_col = route_col if route_col and work[route_col].nunique(dropna=True) <= 15 else None
+    hover_cols = [c for c in [id_col, route_col, _dashboard_length_col(work), "Total_Crashes", "KSI_Crashes_Dashboard"] if c and c in work.columns]
+    fig = px.scatter(
+        work,
+        x=metric,
+        y="KSI_Crashes_Dashboard",
+        size="Total_Crashes" if work["Total_Crashes"].sum() > 0 else None,
+        color=color_col,
+        hover_data=hover_cols,
+        size_max=42,
+        title="KSI (K+A) crashes vs HIN priority index",
+    )
+    fig.update_traces(marker=dict(sizemin=6, opacity=0.78, line=dict(width=1, color="white")))
+    fig.update_layout(xaxis_title="HIN priority index", yaxis_title="KSI (K+A) crashes")
+    return _polish_figure(fig), work
+
+
+def _render_hin_dashboard_charts(st, hin):
+    if hin is None or getattr(hin, "empty", True):
+        return
+    st.markdown("<div class='dashboard-section-title'>HIN index diagnostics <span>distribution curve, route average/median comparison, and KSI relationship</span></div>", unsafe_allow_html=True)
+    figures = _hin_distribution_figures(hin)
+    bubble_fig, bubble_df = _hin_ka_bubble_figure(hin)
+    if not figures and bubble_fig is None:
+        st.info("HIN diagnostic charts need HIN priority index values and, for the bubble chart, available or mapped KSI (K+A) fields.")
+        return
+    chart_items = figures[:]
+    if bubble_fig is not None:
+        chart_items.append(("KSI (K+A) crashes vs HIN priority index", bubble_fig, bubble_df))
+    cols = st.columns(2)
+    for i, (title, fig, data) in enumerate(chart_items[:4]):
+        with cols[i % 2]:
+            fig.update_layout(height=_chart_height(), margin=dict(l=20, r=20, t=45, b=35))
+            st.plotly_chart(_polish_figure(fig), width="stretch", key=f"hin_diag_{_safe_name(title)}_{i}")
+
+
+def _render_hin_network_summary(st, hin, crashes):
+    """Dashboard-only HIN summary with custom threshold and KSI (K+A) card."""
+    if hin is None or getattr(hin, "empty", True):
+        return
+    metric = _dashboard_hin_metric(hin)
+    if not metric:
+        return
+    st.markdown("<div class='dashboard-section-title'>High Injury Network summary <span>custom HIN threshold, miles, crashes, and KSI (K+A) capture</span></div>", unsafe_allow_html=True)
+    work = hin.copy()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+    _render_ksi_mapping_controls(st, work)
+    length_col = _dashboard_length_col(work)
+    if length_col:
+        work[length_col] = pd.to_numeric(work[length_col], errors="coerce").fillna(0)
+    else:
+        length_col = "__unit_length__"
+        work[length_col] = 1.0
+
+    mode_col, control_col, c_miles, c_crashes, c_ksi = st.columns([1.35, 1.05, 1, 1, 1])
+    method = mode_col.selectbox(
+        "High-risk network threshold",
+        ["Top percent of miles", "Top number of segments/windows", "HIN index threshold", "Above average HIN index", "Above median HIN index"],
+        index=0,
+        key="hin_summary_threshold_mode_v39",
+    )
+    top_percent = 10.0
+    top_n = 20
+    index_threshold = 50.0
+    with control_col:
+        if method == "Top percent of miles":
+            top_percent = st.number_input("Top percent", min_value=1.0, max_value=100.0, value=float(st.session_state.get("hin_summary_top_percent", 10.0)), step=1.0, key="hin_summary_top_percent")
+        elif method == "Top number of segments/windows":
+            top_n = st.number_input("Top N", min_value=1, max_value=max(int(len(work)), 1), value=min(20, max(int(len(work)), 1)), step=1, key="hin_summary_top_n")
+        elif method == "HIN index threshold":
+            index_threshold = st.number_input("Minimum HIN index", min_value=0.0, max_value=100.0, value=float(st.session_state.get("hin_summary_index_threshold", 50.0)), step=5.0, key="hin_summary_index_threshold")
+        elif method == "Above average HIN index":
+            st.metric("Average", f"{work[metric].mean():,.2f}")
+        elif method == "Above median HIN index":
+            st.metric("Median", f"{work[metric].median():,.2f}")
+
+    selected = _selected_hin_subset(work, metric, method, top_percent=top_percent, top_n=top_n, index_threshold=index_threshold)
+    total_mi = float(work[length_col].sum()) if work[length_col].sum() else float(len(work))
+    high_mi = float(selected[length_col].sum()) if not selected.empty else 0.0
+    pct_mi = high_mi / total_mi * 100 if total_mi else 0.0
+
+    count_col = _crash_count_col(work)
+    total_crashes = int(pd.to_numeric(work[count_col], errors="coerce").fillna(0).sum()) if count_col else (len(crashes) if crashes is not None else 0)
+    high_crashes = int(pd.to_numeric(selected[count_col], errors="coerce").fillna(0).sum()) if count_col and not selected.empty else 0
+    pct_crash = high_crashes / total_crashes * 100 if total_crashes else 0.0
+
+    total_ksi_series = _hin_ka_series(work)
+    selected_ksi_series = _hin_ka_series(selected)
+    total_ksi = int(pd.to_numeric(total_ksi_series, errors="coerce").fillna(0).sum()) if len(total_ksi_series) else _total_ka_from_crashes(crashes)
+    high_ksi = int(pd.to_numeric(selected_ksi_series, errors="coerce").fillna(0).sum()) if len(selected_ksi_series) else 0
+    pct_ksi = high_ksi / total_ksi * 100 if total_ksi else 0.0
+
+    c_miles.metric("High-risk miles", f"{high_mi:,.2f} mi", f"{pct_mi:,.1f}% of analyzed miles")
+    c_crashes.metric("Crashes on selected HIN", f"{high_crashes:,}", f"{pct_crash:,.1f}% of assigned crashes")
+    c_ksi.metric("KSI (K+A) on selected HIN", f"{high_ksi:,}", f"{pct_ksi:,.1f}% of KSI (K+A)")
+
+    selected_display = _add_dashboard_rate_columns(selected, crashes=crashes)
+    with st.expander("Selected HIN summary rows", expanded=False):
+        preview_cols = []
+        for c in [
+            _normal_col(selected_display, ["RiskSegmentID", "WindowID", "SegmentID", "UnitID", "CorridorID"]),
+            _normal_col(selected_display, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"]),
+            _dashboard_length_col(selected_display), _crash_count_col(selected_display),
+            "KSI_Crashes_Dashboard", metric, "Dashboard_Analysis_Years", "Crash_per_Mile_per_Year", "KSI_per_Mile_per_Year",
+        ]:
+            if c and c in selected_display.columns and c not in preview_cols:
+                preview_cols.append(c)
+        if preview_cols:
+            st.dataframe(_safe_dataframe_for_display(selected_display[preview_cols].head(50)), width="stretch", hide_index=True)
+        else:
+            st.info("No displayable HIN rows are available for the selected threshold.")
+    years = _dashboard_year_count(crashes)
+    st.caption(f"Crashes/mile/year fields use the crash data year span detected in the loaded crashes: {years:g} year(s). These controls summarize existing HIN results only; they do not recalculate HIN scores.")
+    _render_hin_dashboard_charts(st, hin)
+
+
+def _hin_table_for_display(hin, metric, top_n=20):
+    """Decision table for top HIN windows/segments with display-only KSI and rates."""
+    if hin is None or getattr(hin, "empty", True) or metric not in hin.columns:
+        return pd.DataFrame()
+    crashes = None
+    try:
+        crashes = _available_tables(st).get("Assigned crashes", _available_tables(st).get("Uploaded crashes"))
+    except Exception:
+        crashes = None
+    work = _add_dashboard_rate_columns(hin.copy(), crashes=crashes)
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+    work = work.sort_values(metric, ascending=False).head(top_n).reset_index(drop=True)
+    id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
+    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "CorridorRoute", "RouteName_Calc", "Name"])
+    length_col = _dashboard_length_col(work)
+    from_col = _normal_col(work, ["FromMile", "From_Mile", "from_mile", "BeginMile", "StartMile", "WindowFromMile"])
+    to_col = _normal_col(work, ["ToMile", "To_Mile", "to_mile", "EndMile", "WindowToMile"])
+    count_col = _crash_count_col(work)
+    out = pd.DataFrame()
+    out["Rank"] = range(1, len(work) + 1)
+    out["SegID"] = work[id_col].astype(str).values if id_col else [f"HIN_{i + 1}" for i in range(len(work))]
+    out["Seg/window length"] = pd.to_numeric(work[length_col], errors="coerce").round(3).values if length_col else ""
+    out["From mile"] = pd.to_numeric(work[from_col], errors="coerce").round(3).values if from_col else ""
+    out["To mile"] = pd.to_numeric(work[to_col], errors="coerce").round(3).values if to_col else ""
+    out["Route"] = work[route_col].astype(str).values if route_col else ""
+    out["Crash count"] = pd.to_numeric(work[count_col], errors="coerce").fillna(0).round(0).astype(int).values if count_col else ""
+    out["KSI (K+A) crashes"] = pd.to_numeric(work["KSI_Crashes_Dashboard"], errors="coerce").fillna(0).round(0).astype(int).values if "KSI_Crashes_Dashboard" in work.columns else ""
+    out["HIN index"] = pd.to_numeric(work[metric], errors="coerce").round(3).values
+    if "Crash_per_Mile" in work.columns:
+        out["Crashes/mile"] = pd.to_numeric(work["Crash_per_Mile"], errors="coerce").round(3).values
+    if "Crash_per_Mile_per_Year" in work.columns:
+        out["Crashes/mile/year"] = pd.to_numeric(work["Crash_per_Mile_per_Year"], errors="coerce").round(3).values
+    if "KSI_per_Mile_per_Year" in work.columns:
+        out["KSI (K+A)/mile/year"] = pd.to_numeric(work["KSI_per_Mile_per_Year"], errors="coerce").round(3).values
+    if "Dashboard_Analysis_Years" in work.columns:
+        out["Crash years used"] = pd.to_numeric(work["Dashboard_Analysis_Years"], errors="coerce").round(1).values
+    return out
+
+
+def _top_density_export_table(density, top_n=20):
+    """Decision-ready crash-density table with display-only rate columns."""
+    if density is None or getattr(density, "empty", True):
+        return pd.DataFrame()
+    crashes = None
+    try:
+        crashes = _available_tables(st).get("Assigned crashes", _available_tables(st).get("Uploaded crashes"))
+    except Exception:
+        crashes = None
+    df = _add_dashboard_rate_columns(_drop_geometry(density).copy(), crashes=crashes)
+    unit_col = _unit_col(df) or _normal_col(df, ["UnitID", "IntersectionID", "CorridorID", "SegmentID", "Route"])
+    unit_type_col = _normal_col(df, ["UnitType", "IntersectionType", "CorridorType", "SegmentType"])
+    city_col = _normal_col(df, ["City", "city_name"])
+    length_col = _dashboard_length_col(df)
+    count_col = _crash_count_col(df)
+    density_col = _normal_col(df, ["CrashDensity", "Crash_Density", "crash_density"])
+    if density_col is None:
+        density_col = _default_metric(_numeric_cols(df))
+    if density_col:
+        df[density_col] = pd.to_numeric(df[density_col], errors="coerce").fillna(0)
+        df = df.sort_values(density_col, ascending=False)
+    use = df.head(top_n).reset_index(drop=True)
+    out = pd.DataFrame({"Rank": range(1, len(use) + 1)})
+    out["Spatial unit id"] = use[unit_col].astype(str) if unit_col else use.index.astype(str)
+    out["Unit type"] = use[unit_type_col].astype(str) if unit_type_col else ""
+    out["City"] = use[city_col].astype(str) if city_col else ""
+    out["Length_mi"] = pd.to_numeric(use[length_col], errors="coerce").round(3) if length_col else ""
+    route_col = _normal_col(use, ["Route", "FULLNAME", "RoadName", "RouteName", "CorridorRoute", "RouteName_Calc"])
+    if route_col:
+        out["Route name"] = use[route_col].astype(str)
+    out["Crash count"] = pd.to_numeric(use[count_col], errors="coerce").fillna(0).astype(int) if count_col else ""
+    out["Crash density"] = pd.to_numeric(use[density_col], errors="coerce").round(3) if density_col else ""
+    for src, label in [("Crash_per_Mile", "Crashes/mile"), ("Crash_per_Mile_per_Year", "Crashes/mile/year"), ("KSI_per_Mile_per_Year", "KSI (K+A)/mile/year")]:
+        if src in use.columns:
+            out[label] = pd.to_numeric(use[src], errors="coerce").round(3)
+    if "Dashboard_Analysis_Years" in use.columns:
+        out["Crash years used"] = pd.to_numeric(use["Dashboard_Analysis_Years"], errors="coerce").round(1)
+    return out
+
+
+def _download_generated_data_zip(st, tables):
+    """Export only workflow-generated data in a clean CSV/GeoJSON structure.
+
+    Folder structure inside the ZIP:
+        csv/roads
+        csv/signals
+        csv/spatial_units_crashes
+        csv/sliding_windows
+        geojson/roads
+        geojson/signals
+        geojson/spatial_units_crashes
+        geojson/sliding_windows
+
+    The export intentionally excludes original uploaded source files/raw crash
+    uploads. It includes only app-generated/processed outputs needed for review,
+    GIS use, and report backup.
+    """
+    buffer = io.BytesIO()
+    written_paths = set()
+    manifest = []
+
+    def clean_folder(value):
+        value = str(value or "").strip().lower()
+        value = re.sub(r"[^a-z0-9]+", "_", value).strip("_")
+        return value or "data"
+
+    def add_bytes(zf, path, data, description=""):
+        if data is None:
+            return False
+        path = str(path).replace("\\", "/")
+        if path in written_paths:
+            return False
+        zf.writestr(path, data)
+        written_paths.add(path)
+        if description:
+            manifest.append(f"{path} - {description}")
+        else:
+            manifest.append(path)
+        return True
+
+    def _with_point_lat_lon(obj):
+        """Add Latitude/Longitude fields for point GeoDataFrames before CSV export."""
+        if obj is None or getattr(obj, "empty", False):
+            return obj
+        if not hasattr(obj, "geometry") or "geometry" not in obj.columns:
+            return obj
+        try:
+            gdf = _repair_gdf_crs(obj, st).copy()
+            gdf_ll = gdf.to_crs(4326) if getattr(gdf, "crs", None) is not None else gdf
+            geom = gdf_ll.geometry
+            if geom.geom_type.isin(["Point"]).all():
+                if "Longitude" not in gdf.columns and "Long" not in gdf.columns and "Lon" not in gdf.columns:
+                    gdf["Longitude"] = geom.x
+                if "Latitude" not in gdf.columns and "Lat" not in gdf.columns:
+                    gdf["Latitude"] = geom.y
+            return gdf
+        except Exception:
+            return obj
+
+    def simplify_roads(obj):
+        """Export only analysis road segment attributes and geometry."""
+        if obj is None or getattr(obj, "empty", False):
+            return obj
+        df = obj.copy()
+        preferred = [
+            st.session_state.get("segment_id_col"),
+            st.session_state.get("route_col"),
+            "OSMEdgeID", "LINEARID", "FACILITYID", "SegmentID", "SegID", "UnitID",
+            "Route", "FULLNAME", "RouteNameOSM", "RouteName_Calc",
+            "FromMile", "ToMile", "SegmentLength_Mile",
+            "FunctionalClass", "RoadClass", "RoadType", "RoadStyleClass",
+            "MTFCC", "RTTYP", "OSMHighway", "geometry",
+        ]
+        cols = []
+        for c in preferred:
+            if c and c in df.columns and c not in cols:
+                cols.append(c)
+        return df[cols].copy() if cols else df
+
+    def simplify_signals(obj):
+        """Export the same cleaned signal table shown in the workflow.
+
+        CSV columns are limited to SignalID, City, Latitude, and Longitude.
+        GeoJSON keeps the same attributes plus point geometry.
+        """
+        if obj is None or getattr(obj, "empty", False):
+            return obj
+
+        df = _with_point_lat_lon(obj).copy()
+
+        if "SignalID" not in df.columns:
+            df["SignalID"] = range(1, len(df) + 1)
+
+        if "City" not in df.columns:
+            df["City"] = st.session_state.get("area_name", "")
+
+        lat_col = _normal_col(df, ["Latitude", "Lat", "LAT", "Y"])
+        lon_col = _normal_col(df, ["Longitude", "Long", "Lon", "LON", "X"])
+
+        if lat_col and lat_col != "Latitude":
+            df["Latitude"] = pd.to_numeric(df[lat_col], errors="coerce")
+        if lon_col and lon_col != "Longitude":
+            df["Longitude"] = pd.to_numeric(df[lon_col], errors="coerce")
+
+        preferred = [
+            "SignalID",
+            "City",
+            "Latitude",
+            "Longitude",
+            "geometry",
+        ]
+        cols = [c for c in preferred if c in df.columns]
+        return df[cols].copy() if cols else df
+
+    def simplify_corridors(obj):
+        """Export the same final corridor table shown in the workflow.
+
+        CSV columns are limited to CorridorID, Route, and City. GeoJSON keeps
+        the corridor geometry when available.
+        """
+        if obj is None or getattr(obj, "empty", False):
+            return obj
+
+        df = obj.copy()
+
+        corridor_col = _normal_col(df, ["CorridorID", "CorridorId", "corridor_id"])
+        route_col = _normal_col(df, ["Route", "RouteName", "FULLNAME", "CorridorRoute", "Route_Normalized"])
+        city_col = _normal_col(df, ["City", "city", "area_name"])
+
+        if corridor_col and corridor_col != "CorridorID":
+            df["CorridorID"] = df[corridor_col]
+        if route_col and route_col != "Route":
+            df["Route"] = df[route_col]
+        if city_col and city_col != "City":
+            df["City"] = df[city_col]
+        if "City" not in df.columns:
+            df["City"] = st.session_state.get("area_name", "")
+
+        preferred = ["CorridorID", "Route", "City", "geometry"]
+        cols = [c for c in preferred if c in df.columns]
+        return df[cols].copy() if cols else df
+
+    def simplify_spatial_units_density(obj):
+        """Export only necessary spatial-unit density fields plus geometry."""
+        if obj is None or getattr(obj, "empty", False):
+            return obj
+
+        df = obj.copy()
+
+        unit_col = _normal_col(df, ["UnitID", "SpatialUnitID", "IntersectionID", "CorridorID", "SegmentID"])
+        unit_type_col = _normal_col(df, ["UnitType", "AnalysisType", "SpatialUnitType", "Type"])
+        segment_col = _normal_col(df, ["SegmentID", "SegID", "OSMEdgeID", "LINEARID", "FACILITYID"])
+        crash_col = _normal_col(df, ["CrashCount", "Crash_Count", "TotalCrashes", "Crash count"])
+        length_col = _normal_col(df, ["Length_Miles", "Length_Mile", "SegmentLength_Mile", "CorridorLength_Mile", "Miles"])
+        area_col = _normal_col(df, ["Area_SqMi", "AreaSqMi", "Area_Sq_Mi", "AreaSquareMiles"])
+        density_col = _normal_col(df, ["CrashDensity", "Crash_Density", "Density", "Crash density"])
+
+        rename_map = {}
+        for src, dst in [
+            (unit_col, "UnitID"),
+            (unit_type_col, "UnitType"),
+            (segment_col, "SegmentID"),
+            (crash_col, "CrashCount"),
+            (length_col, "Length_Miles"),
+            (area_col, "Area_SqMi"),
+            (density_col, "CrashDensity"),
+        ]:
+            if src and src in df.columns and src != dst:
+                rename_map[src] = dst
+        if rename_map:
+            df = df.rename(columns=rename_map)
+
+        if "UnitType" not in df.columns:
+            df["UnitType"] = st.session_state.get("analysis_type", "")
+        if "SegmentID" not in df.columns:
+            df["SegmentID"] = ""
+
+        preferred = [
+            "UnitID",
+            "UnitType",
+            "SegmentID",
+            "CrashCount",
+            "Length_Miles",
+            "Area_SqMi",
+            "CrashDensity",
+            "geometry",
+        ]
+        cols = [c for c in preferred if c in df.columns]
+        return df[cols].copy() if cols else df
+
+    def add_hin_index_to_windows(obj):
+        """Ensure sliding-window exports include an explicit HIN_Index column."""
+        if obj is None or getattr(obj, "empty", False):
+            return obj
+        df = obj.copy()
+        if "HIN_Index" not in df.columns:
+            if "HIN_Priority_Index" in df.columns:
+                df["HIN_Index"] = pd.to_numeric(df["HIN_Priority_Index"], errors="coerce")
+            else:
+                try:
+                    df["HIN_Index"] = _window_hin_index_series(df).values
+                except Exception:
+                    metric = _dashboard_hin_metric(df)
+                    if metric and metric in df.columns:
+                        vals = pd.to_numeric(df[metric], errors="coerce").fillna(0)
+                        max_val = float(vals.max()) if len(vals) else 0.0
+                        df["HIN_Index"] = vals / max_val * 100.0 if max_val > 0 else vals
+        if "HIN_Priority_Index" not in df.columns and "HIN_Index" in df.columns:
+            df["HIN_Priority_Index"] = df["HIN_Index"]
+        return df
+
+    def build_route_hin_corridors(results):
+        """Create one HIN corridor per route for export.
+
+        The raw risk_corridors output can split one route into many corridor IDs.
+        For the clean export, each route is one corridor with a numeric CorridorID.
+        """
+        if not isinstance(results, dict):
+            return None
+        src = results.get("risk_windows")
+        if src is None or getattr(src, "empty", True):
+            src = results.get("risk_segments")
+        if src is None or getattr(src, "empty", True):
+            return None
+        df = add_hin_index_to_windows(src).copy()
+        route_col = _section7_route_col_from_tables(df, None) or _normal_col(
+            df,
+            ["Route", "FULLNAME", "RouteName", "RoadName", "RouteName_Calc", "CorridorRoute", "Name"],
+        )
+        if not route_col or route_col not in df.columns:
+            return None
+        metric = "HIN_Index" if "HIN_Index" in df.columns else _dashboard_hin_metric(df)
+        if metric and metric in df.columns:
+            df[metric] = pd.to_numeric(df[metric], errors="coerce").fillna(0)
+        length_col = _dashboard_length_col(df)
+        if length_col and length_col in df.columns:
+            df[length_col] = pd.to_numeric(df[length_col], errors="coerce").fillna(0)
+
+        rows = []
+        is_geo = hasattr(df, "geometry") and "geometry" in df.columns
+        for i, (route, grp) in enumerate(df.groupby(route_col, dropna=False), start=1):
+            row = {
+                "CorridorID": i,
+                "Route": str(route),
+                "Segment_Count": int(len(grp)),
+            }
+            if metric and metric in grp.columns:
+                row["Max_HIN"] = float(pd.to_numeric(grp[metric], errors="coerce").fillna(0).max())
+                row["Avg_HIN_Index"] = float(pd.to_numeric(grp[metric], errors="coerce").fillna(0).mean())
+                row["Median_HIN_Index"] = float(pd.to_numeric(grp[metric], errors="coerce").fillna(0).median())
+            if length_col and length_col in grp.columns:
+                row["Total_Window_Miles"] = float(pd.to_numeric(grp[length_col], errors="coerce").fillna(0).sum())
+            if is_geo:
+                try:
+                    row["geometry"] = grp.geometry.union_all()
+                except Exception:
+                    try:
+                        row["geometry"] = grp.geometry.unary_union
+                    except Exception:
+                        pass
+            rows.append(row)
+        if not rows:
+            return None
+        if is_geo and any("geometry" in r for r in rows):
+            try:
+                return gpd.GeoDataFrame(rows, geometry="geometry", crs=getattr(df, "crs", None))
+            except Exception:
+                return pd.DataFrame(rows)
+        return pd.DataFrame(rows)
+
+    def add_df(zf, folder, name, obj, description="", csv_only=False, geojson_only=False):
+        if obj is None or getattr(obj, "empty", False):
+            return 0
+        folder = clean_folder(folder)
+        safe_name = _safe_name(name)
+        count = 0
+        if not geojson_only:
+            try:
+                csv = _safe_dataframe_for_display(obj).to_csv(index=False).encode("utf-8")
+                if add_bytes(
+                    zf,
+                    f"csv/{folder}/{safe_name}.csv",
+                    csv,
+                    description or f"CSV export for {name}",
+                ):
+                    count += 1
+            except Exception as exc:
+                add_bytes(
+                    zf,
+                    f"csv/{folder}/{safe_name}_export_error.txt",
+                    str(exc).encode("utf-8"),
+                    f"CSV export error for {name}",
+                )
+                count += 1
+        if not csv_only:
+            try:
+                if hasattr(obj, "geometry") and "geometry" in obj.columns:
+                    gdf = _repair_gdf_crs(obj, st)
+                    gdf = _safe_geojson_gdf(gdf)
+                    if gdf is not None and not getattr(gdf, "empty", True):
+                        geojson = gdf.to_json().encode("utf-8")
+                        if add_bytes(
+                            zf,
+                            f"geojson/{folder}/{safe_name}.geojson",
+                            geojson,
+                            description or f"GeoJSON export for {name}",
+                        ):
+                            count += 1
+            except Exception as exc:
+                add_bytes(
+                    zf,
+                    f"geojson/{folder}/{safe_name}_export_error.txt",
+                    str(exc).encode("utf-8"),
+                    f"GeoJSON export error for {name}",
+                )
+                count += 1
+        return count
+
+    def add_report_table(zf, folder, name, obj):
+        return add_df(
+            zf,
+            folder,
+            f"report_table_{name}",
+            obj,
+            f"Report/dashboard table: {name}",
+            csv_only=True,
+        )
+
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        # 1. Roads: analysis road segments only, with route/milepost/length fields.
+        roads = st.session_state.get("selected_roads")
+        if roads is None or getattr(roads, "empty", True):
+            roads = st.session_state.get("base_roads")
+        add_df(
+            zf,
+            "roads",
+            "road_segments_from_to_mile",
+            simplify_roads(roads),
+            "Analysis road segments with FromMile, ToMile, and SegmentLength_Mile.",
+        )
+
+        # 2. Signals: cleaned signal table only, with SignalID, lat/lon, and city.
+        add_df(
+            zf,
+            "signals",
+            "cleaned_signal_table",
+            simplify_signals(st.session_state.get("signals_clean")),
+            "Cleaned/de-duplicated signal points with SignalID, latitude, longitude, and city.",
+        )
+
+        # 3. Corridors, spatial-unit density results, assigned crash points, and summary tables.
+        corridors = st.session_state.get("final_corridors")
+        if corridors is None or getattr(corridors, "empty", True):
+            corridors = st.session_state.get("corridors")
+        add_df(
+            zf,
+            "spatial_units_crashes",
+            "corridor_table",
+            simplify_corridors(corridors),
+            "Final corridor table with CorridorID, Route, City, and corridor geometry.",
+        )
+
+        # The separate spatial_units table is intentionally not exported because
+        # the density results file contains the necessary unit ID/type/count/rate
+        # fields plus geometry.
+        add_df(
+            zf,
+            "spatial_units_crashes",
+            "spatial_units_density_results",
+            simplify_spatial_units_density(st.session_state.get("spatial_units_density_map")),
+            "Spatial unit density results with only UnitID, UnitType, SegmentID, CrashCount, Length_Miles, Area_SqMi, and CrashDensity.",
+        )
+        add_df(
+            zf,
+            "spatial_units_crashes",
+            "crashes_assigned_to_units",
+            _with_point_lat_lon(st.session_state.get("assigned_crashes")),
+            "Crash point records assigned to generated spatial units.",
+        )
+        add_df(
+            zf,
+            "spatial_units_crashes",
+            "kabco_summary",
+            st.session_state.get("kabco_result"),
+            "KABCO crash summary table generated by the workflow.",
+            csv_only=True,
+        )
+        add_df(
+            zf,
+            "spatial_units_crashes",
+            "classified_results",
+            st.session_state.get("classified"),
+            "Classified crash/spatial-unit result table generated by the workflow.",
+        )
+
+        # Include report-ready tables, but not raw uploaded crash data and not duplicates of core HIN/window files.
+        try:
+            report_tables = _report_tables(tables or {}, top_n=100000)
+        except Exception:
+            report_tables = {}
+        for table_name, table_obj in (report_tables or {}).items():
+            lower = str(table_name).lower()
+            if "uploaded crash" in lower or "raw crash" in lower:
+                continue
+            # Avoid duplicate exports of the core sliding-window/HIN files below.
+            if any(term in lower for term in ["sliding_window_table", "hin_segments", "hin_corridors"]):
+                continue
+            if "sliding" in lower or "hin" in lower:
+                folder = "sliding_windows"
+            else:
+                folder = "spatial_units_crashes"
+            add_report_table(zf, folder, table_name, table_obj)
+
+        # 4. Sliding windows / HIN: window table, HIN segments, and one route-level HIN corridor file.
+        results = st.session_state.get("section7_results")
+        if isinstance(results, dict):
+            add_df(
+                zf,
+                "sliding_windows",
+                "sliding_window_table",
+                add_hin_index_to_windows(results.get("risk_windows")),
+                "Sliding-window table with route, window, crash count, score, and HIN index.",
+            )
+            add_df(
+                zf,
+                "sliding_windows",
+                "hin_segments",
+                add_hin_index_to_windows(results.get("risk_segments")),
+                "HIN segment/window GeoJSON and table with HIN index.",
+            )
+            add_df(
+                zf,
+                "sliding_windows",
+                "hin_corridors",
+                build_route_hin_corridors(results),
+                "Route-level HIN corridor summary: one numeric CorridorID per route.",
+            )
+            # Do not export sliding_window_assigned_crashes. It is an internal intermediate table.
+
+        readme = """HIN generated data export
+
+This ZIP contains processed outputs generated by the app. It intentionally does not include original uploaded source files or raw uploaded crash files.
+
+Folder structure
+- csv/roads and geojson/roads: analysis road segments only, including FromMile, ToMile, and SegmentLength_Mile when available.
+- csv/signals and geojson/signals: cleaned/de-duplicated signal points with SignalID, Latitude, Longitude, and City.
+- csv/spatial_units_crashes and geojson/spatial_units_crashes: final corridors, spatial-unit density results, crash points assigned to units, KABCO/report tables. The separate spatial_units table is not exported because the density results file contains the necessary unit attributes.
+- csv/sliding_windows and geojson/sliding_windows: sliding-window/HIN tables and geometries. The assigned-crash intermediate table is intentionally not exported.
+
+Manifest
+"""
+        add_bytes(
+            zf,
+            "README_export_manifest.txt",
+            (readme + "\n".join(manifest)).encode("utf-8"),
+            "Export manifest.",
+        )
+
+    if len(written_paths) <= 1:
+        return None
+    buffer.seek(0)
+    return buffer.getvalue()
+
+def _available_maps(st):
+    """Dashboard map layers, including display-only HIN threshold maps."""
+    maps = {}
+    density = st.session_state.get("spatial_units_density_map")
+    if density is not None and not getattr(density, "empty", True):
+        maps["Crash density map"] = _repair_gdf_crs(density, st)
+    results = st.session_state.get("section7_results")
+    if results is not None:
+        risk_segments = results.get("risk_segments")
+        if risk_segments is not None and not getattr(risk_segments, "empty", True):
+            hin_map = _repair_gdf_crs(risk_segments, st)
+            maps["HIN priority map"] = hin_map
+            metric = _dashboard_hin_metric(hin_map)
+            if metric:
+                work = hin_map.copy()
+                work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+                avg = work[metric].mean()
+                med = work[metric].median()
+                maps["HIN above average map"] = work[work[metric] >= avg].copy()
+                maps["HIN above median map"] = work[work[metric] >= med].copy()
+    corridors = st.session_state.get("final_corridors", st.session_state.get("corridors"))
+    if corridors is not None and not getattr(corridors, "empty", True):
+        maps["Corridor map"] = _repair_gdf_crs(corridors, st)
+    return {k: v for k, v in maps.items() if v is not None and not getattr(v, "empty", True)}
+
+
+# --- V40 dashboard-only corrections: safe KSI, clearer HIN diagnostics ---
+# These override earlier dashboard helper functions only. They do not change
+# HIN/sliding-window calculations or stored workflow results.
+
+
+def _dashboard_crash_id_col(df):
+    return _normal_col(
+        df,
+        [
+            "CrashID", "CrashId", "crash_id", "CRASH_ID", "CaseID", "CASE_ID",
+            "OBJECTID", "ObjectID", "FID", "RecordID", "UnitID", "Crash_Key",
+        ],
+    )
+
+
+def _strict_hin_ksi_series(df):
+    """Return explicit row-level KSI only when the HIN table truly has it.
+
+    Do not auto-detect generic one-letter K/A columns. In some result tables,
+    those names can refer to unrelated fields or duplicated window values,
+    which produced impossible KSI totals.
+    """
+    if df is None or getattr(df, "empty", True):
+        return pd.Series(dtype="float64")
+
+    combined_key = st.session_state.get("dashboard_ksi_combined_col")
+    k_key = st.session_state.get("dashboard_ksi_k_col")
+    a_key = st.session_state.get("dashboard_ksi_a_col")
+
+    if combined_key and combined_key in df.columns:
+        return _dashboard_numeric_series(df, combined_key)
+    if (k_key and k_key in df.columns) or (a_key and a_key in df.columns):
+        return _dashboard_numeric_series(df, k_key) + _dashboard_numeric_series(df, a_key)
+
+    combined_candidates = [
+        "KSI_Crashes", "KSI_Count", "KSI_Crash_Count", "KSI_Total",
+        "KA_Crashes", "K_A_Crashes", "KA_Count", "KA_Total",
+        "FatalAndSeriousInjuryCrashes", "Fatal_Serious_Injury_Count",
+        "Fatal_Serious_Crashes",
+    ]
+    for col in combined_candidates:
+        if col in df.columns:
+            return _dashboard_numeric_series(df, col)
+
+    k_candidates = [
+        "K_Crashes", "K_Count", "Fatal_Crashes", "FatalCrashCount", "Fatal_Count",
+    ]
+    a_candidates = [
+        "A_Crashes", "A_Count", "Serious_Injury_Crashes",
+        "SeriousInjuryCrashCount", "Serious_Injury_Count",
+    ]
+    k_col = _normal_col(df, k_candidates)
+    a_col = _normal_col(df, a_candidates)
+    if k_col or a_col:
+        return _dashboard_numeric_series(df, k_col) + _dashboard_numeric_series(df, a_col)
+
+    return pd.Series([0] * len(df), index=df.index, dtype="float64")
+
+
+def _hin_ka_series(df):
+    """Compatibility wrapper using strict KSI detection."""
+    return _strict_hin_ksi_series(df)
+
+
+def _crash_level_ksi_series(crashes):
+    """Return one KSI value per crash row using crash-level fields.
+
+    This is used for dashboard cards and avoids summing HIN window rows.
+    """
+    if crashes is None or getattr(crashes, "empty", True):
+        return pd.Series(dtype="float64")
+
+    work = crashes.copy()
+
+    combined_col = st.session_state.get("dashboard_crash_ksi_combined_col")
+    k_col_user = st.session_state.get("dashboard_crash_ksi_k_col")
+    a_col_user = st.session_state.get("dashboard_crash_ksi_a_col")
+    kabco_user = st.session_state.get("dashboard_crash_ksi_kabco_col")
+
+    if combined_col and combined_col in work.columns:
+        return pd.to_numeric(work[combined_col], errors="coerce").fillna(0)
+
+    if (k_col_user and k_col_user in work.columns) or (a_col_user and a_col_user in work.columns):
+        k = pd.to_numeric(work[k_col_user], errors="coerce").fillna(0) if k_col_user in work.columns else 0
+        a = pd.to_numeric(work[a_col_user], errors="coerce").fillna(0) if a_col_user in work.columns else 0
+        return k + a
+
+    if kabco_user and kabco_user in work.columns:
+        vals = work[kabco_user].map(normalize_kabco_value).astype(str).str.upper()
+        return vals.isin(["K", "A"]).astype(int)
+
+    sev_cols = _severity_count_columns(work)
+    if sev_cols:
+        k = pd.to_numeric(work[sev_cols.get("K")], errors="coerce").fillna(0) if sev_cols.get("K") else 0
+        a = pd.to_numeric(work[sev_cols.get("A")], errors="coerce").fillna(0) if sev_cols.get("A") else 0
+        return k + a
+
+    kabco = _kabco_col(work)
+    if kabco and kabco in work.columns:
+        vals = work[kabco].map(normalize_kabco_value).astype(str).str.upper()
+        return vals.isin(["K", "A"]).astype(int)
+
+    return pd.Series([0] * len(work), index=work.index, dtype="float64")
+
+
+def _total_ka_from_crashes(crashes):
+    vals = _crash_level_ksi_series(crashes)
+    if vals is None or len(vals) == 0:
+        return 0
+    return int(pd.to_numeric(vals, errors="coerce").fillna(0).sum())
+
+
+def _render_crash_ksi_mapping_controls(st, crashes):
+    """Crash-level KSI mapping controls used by dashboard only."""
+    if crashes is None or getattr(crashes, "empty", True):
+        return
+
+    cols = [c for c in crashes.columns if c != "geometry"]
+    numeric_cols = [c for c in cols if pd.to_numeric(crashes[c], errors="coerce").notna().any()]
+    options_all = [""] + cols
+    options_num = [""] + numeric_cols
+    auto_total = _total_ka_from_crashes(crashes)
+
+    with st.expander("KSI (K+A) crash field mapping for dashboard", expanded=(auto_total <= 0)):
+        st.caption(
+            "Use this only if the dashboard cannot auto-detect the crash severity fields. "
+            "This reads the uploaded/assigned crash table, not the HIN score table, so totals should match the Crash summary KPI."
+        )
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            default = st.session_state.get("dashboard_crash_ksi_kabco_col", "")
+            st.selectbox(
+                "KABCO/severity column",
+                options_all,
+                index=options_all.index(default) if default in options_all else 0,
+                key="dashboard_crash_ksi_kabco_col",
+            )
+        with c2:
+            default = st.session_state.get("dashboard_crash_ksi_combined_col", "")
+            st.selectbox(
+                "Combined KSI (K+A) count column",
+                options_num,
+                index=options_num.index(default) if default in options_num else 0,
+                key="dashboard_crash_ksi_combined_col",
+            )
+        with c3:
+            default = st.session_state.get("dashboard_crash_ksi_k_col", "")
+            st.selectbox(
+                "K fatal count column",
+                options_num,
+                index=options_num.index(default) if default in options_num else 0,
+                key="dashboard_crash_ksi_k_col",
+            )
+        with c4:
+            default = st.session_state.get("dashboard_crash_ksi_a_col", "")
+            st.selectbox(
+                "A serious injury count column",
+                options_num,
+                index=options_num.index(default) if default in options_num else 0,
+                key="dashboard_crash_ksi_a_col",
+            )
+        st.caption(f"Detected total KSI (K+A) crashes from crash table: {_total_ka_from_crashes(crashes):,}")
+
+
+def _candidate_unit_id_cols(df):
+    if df is None or getattr(df, "empty", True):
+        return []
+    names = [
+        "RiskSegmentID", "SlidingWindowID", "WindowID", "SegmentID", "SegID",
+        "SourceSegmentID", "UnitID", "SpatialUnitID", "IntersectionID",
+        "CorridorID", "Corridor_Key", "AssignedUnitID", "MatchedUnitID",
+        "NearestSegmentID", "RoadSegmentID",
+    ]
+    out = []
+    for c in names:
+        if c in df.columns and c not in out:
+            out.append(c)
+    # Include columns that look like IDs but avoid crash ID.
+    for c in df.columns:
+        cl = str(c).lower()
+        if c not in out and "id" in cl and "crash" not in cl and c != "geometry":
+            out.append(c)
+    return out
+
+
+def _selected_hin_crash_subset(selected_hin, crashes):
+    """Try to identify crash rows linked to selected HIN rows by existing IDs.
+
+    Returns (subset, method_note). If no trusted linkage exists, returns
+    (None, explanation). No new assignment is performed here.
+    """
+    if selected_hin is None or getattr(selected_hin, "empty", True):
+        return None, "No selected HIN rows."
+    if crashes is None or getattr(crashes, "empty", True):
+        return None, "No assigned/uploaded crash table available."
+
+    selected_cols = _candidate_unit_id_cols(selected_hin)
+    crash_cols = _candidate_unit_id_cols(crashes)
+    for sc in selected_cols:
+        svals = selected_hin[sc].dropna().astype(str).str.strip()
+        svals = set(v for v in svals if v and v.lower() not in ["nan", "none"])
+        if not svals:
+            continue
+        for cc in crash_cols:
+            cvals = crashes[cc].dropna().astype(str).str.strip()
+            overlap = set(cvals.unique()).intersection(svals)
+            if overlap:
+                subset = crashes[cvals.isin(svals)].copy()
+                return subset, f"Matched selected HIN rows to crashes using {sc} ↔ {cc}."
+    return None, "No existing crash-to-HIN ID linkage was found; selected-HIN crash/KSI capture is not computed from window totals."
+
+
+def _safe_unique_crash_count(crashes):
+    if crashes is None or getattr(crashes, "empty", True):
+        return 0
+    cid = _dashboard_crash_id_col(crashes)
+    if cid and cid in crashes.columns:
+        return int(crashes[cid].dropna().astype(str).nunique())
+    return int(len(crashes))
+
+
+def _add_dashboard_rate_columns(df, crashes=None):
+    """Add display-only crash/mile/year and KSI (K+A)/mile/year fields safely."""
+    if df is None or getattr(df, "empty", True):
+        return df
+    out = df.copy()
+    length_col = _dashboard_length_col(out)
+    count_col = _crash_count_col(out)
+    years = _dashboard_year_count(crashes)
+    out["Dashboard_Analysis_Years"] = years
+    if length_col and count_col:
+        length = pd.to_numeric(out[length_col], errors="coerce").replace(0, pd.NA)
+        count = pd.to_numeric(out[count_col], errors="coerce").fillna(0)
+        out["Crash_per_Mile"] = (count / length).astype("float64").round(3)
+        out["Crash_per_Mile_per_Year"] = (count / length / years).astype("float64").round(3)
+    ksi = _strict_hin_ksi_series(out)
+    if len(ksi) == len(out) and float(pd.to_numeric(ksi, errors="coerce").fillna(0).sum()) > 0:
+        out["KSI_Crashes_Dashboard"] = pd.to_numeric(ksi, errors="coerce").fillna(0).round(3)
+        if length_col:
+            length = pd.to_numeric(out[length_col], errors="coerce").replace(0, pd.NA)
+            out["KSI_per_Mile_per_Year"] = (pd.to_numeric(ksi, errors="coerce").fillna(0) / length / years).astype("float64").round(3)
+    return out
+
+
+def _hin_distribution_figures(hin):
+    """Clear HIN diagnostics: score-bin distribution plus route mean/median."""
+    figures = []
+    metric = _dashboard_hin_metric(hin)
+    if hin is None or getattr(hin, "empty", True) or not metric:
+        return figures
+    work = _drop_geometry(hin).copy()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce")
+    work = work[work[metric].notna()].copy()
+    if work.empty:
+        return figures
+
+    # Binned line chart is easier to read than sorted percentile when most
+    # segments have HIN = 0 and a few segments jump to 100.
+    max_score = max(float(work[metric].max()), 1.0)
+    bin_width = 5 if max_score <= 100 else max(max_score / 20.0, 1.0)
+    bins = list(pd.interval_range(start=0, end=max_score + bin_width, freq=bin_width, closed="left"))
+    if not bins:
+        bins = pd.interval_range(start=0, end=100, freq=5, closed="left")
+    tmp = work.copy()
+    tmp["HIN score range"] = pd.cut(tmp[metric], bins=bins, include_lowest=True)
+    dist = tmp.groupby("HIN score range", observed=False).size().reset_index(name="Segment/window count")
+    dist["HIN score range"] = dist["HIN score range"].astype(str)
+    dist["Bin midpoint"] = [i * bin_width + bin_width / 2 for i in range(len(dist))]
+    fig = px.line(
+        dist,
+        x="Bin midpoint",
+        y="Segment/window count",
+        markers=True,
+        title="HIN index distribution by score range",
+        labels={"Bin midpoint": "HIN priority index", "Segment/window count": "Segment/window count"},
+    )
+    fig.update_layout(xaxis_title="HIN priority index", yaxis_title="Segment/window count")
+    figures.append(("HIN index distribution by score range", _polish_figure(fig), dist))
+
+    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"])
+    length_col = _dashboard_length_col(work)
+    if route_col:
+        route_work = work.copy()
+        route_work[route_col] = route_work[route_col].fillna("Unknown").astype(str)
+        agg_kwargs = dict(
+            Average_HIN=(metric, "mean"),
+            Median_HIN=(metric, "median"),
+            Max_HIN=(metric, "max"),
+            Segment_Count=(metric, "size"),
+        )
+        if length_col:
+            route_work[length_col] = pd.to_numeric(route_work[length_col], errors="coerce").fillna(0)
+            agg_kwargs["Miles"] = (length_col, "sum")
+        route_summary = route_work.groupby(route_col, dropna=False).agg(**agg_kwargs).reset_index()
+        route_summary = route_summary.sort_values("Average_HIN", ascending=False).head(15)
+        if not route_summary.empty:
+            plot_df = route_summary.copy()
+            plot_df["Average_HIN_Left"] = -pd.to_numeric(plot_df["Average_HIN"], errors="coerce").fillna(0)
+            plot_df["Median_HIN_Right"] = pd.to_numeric(plot_df["Median_HIN"], errors="coerce").fillna(0)
+            plot_df = plot_df.sort_values("Average_HIN", ascending=True)
+            fig = px.bar(
+                plot_df,
+                y=route_col,
+                x=["Average_HIN_Left", "Median_HIN_Right"],
+                orientation="h",
+                barmode="relative",
+                hover_data=[c for c in ["Average_HIN", "Median_HIN", "Max_HIN", "Segment_Count", "Miles"] if c in plot_df.columns],
+                title="Average and median HIN index by route",
+            )
+            for trace in fig.data:
+                if trace.name == "Average_HIN_Left":
+                    trace.name = "Average HIN"
+                    trace.text = [f"{abs(v):.1f}" for v in trace.x]
+                elif trace.name == "Median_HIN_Right":
+                    trace.name = "Median HIN"
+                    trace.text = [f"{v:.1f}" for v in trace.x]
+                trace.textposition = "inside"
+            max_val = max(float(plot_df["Average_HIN"].max() or 0), float(plot_df["Median_HIN"].max() or 0), 1.0)
+            tick_vals = [-max_val, -max_val / 2, 0, max_val / 2, max_val]
+            fig.update_layout(
+                yaxis_title="Route",
+                xaxis_title="HIN priority index",
+                legend_title="Statistic",
+                bargap=0.25,
+                xaxis=dict(tickmode="array", tickvals=tick_vals, ticktext=[f"{abs(v):.0f}" for v in tick_vals]),
+            )
+            figures.append(("Average and median HIN index by route", _polish_figure(fig), route_summary))
+    return figures
+
+
+def _hin_ka_bubble_figure(hin):
+    """Replace confusing point bubble chart with score-band summary.
+
+    If trusted row-level KSI is unavailable, show crash counts by HIN band and
+    skip KSI rather than plotting impossible KSI totals.
+    """
+    metric = _dashboard_hin_metric(hin)
+    if hin is None or getattr(hin, "empty", True) or not metric:
+        return None, pd.DataFrame()
+    work = _drop_geometry(hin).copy()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+    count_col = _crash_count_col(work)
+    if not count_col:
+        return None, pd.DataFrame()
+    work["Total crashes"] = pd.to_numeric(work[count_col], errors="coerce").fillna(0)
+    ksi = _strict_hin_ksi_series(work)
+    has_ksi = len(ksi) == len(work) and float(pd.to_numeric(ksi, errors="coerce").fillna(0).sum()) > 0
+    if has_ksi:
+        work["KSI (K+A) crashes"] = pd.to_numeric(ksi, errors="coerce").fillna(0)
+
+    max_score = max(float(work[metric].max()), 1.0)
+    bin_width = 10 if max_score <= 100 else max(max_score / 10.0, 1.0)
+    bins = pd.interval_range(start=0, end=max_score + bin_width, freq=bin_width, closed="left")
+    work["HIN score range"] = pd.cut(work[metric], bins=bins, include_lowest=True).astype(str)
+    agg = work.groupby("HIN score range", observed=False).agg(**{"Total crashes": ("Total crashes", "sum")}).reset_index()
+    if has_ksi:
+        ksi_agg = work.groupby("HIN score range", observed=False)["KSI (K+A) crashes"].sum().reset_index()
+        agg = agg.merge(ksi_agg, on="HIN score range", how="left")
+        plot_cols = ["Total crashes", "KSI (K+A) crashes"]
+        title = "Crashes and KSI (K+A) by HIN score range"
+    else:
+        plot_cols = ["Total crashes"]
+        title = "Crashes by HIN score range"
+
+    fig = px.bar(
+        agg,
+        x="HIN score range",
+        y=plot_cols,
+        barmode="group",
+        title=title,
+    )
+    fig.update_layout(xaxis_title="HIN priority index range", yaxis_title="Crash count", legend_title="Measure")
+    return _polish_figure(fig), agg
+
+
+def _render_hin_dashboard_charts(st, hin):
+    if hin is None or getattr(hin, "empty", True):
+        return
+    st.markdown(
+        "<div class='dashboard-section-title'>HIN index diagnostics <span>distribution by score range, route average/median comparison, and crash/KSI relationship</span></div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "These charts use all existing HIN result rows and are not affected by the map display choice such as above-average or above-median."
+    )
+    figures = _hin_distribution_figures(hin)
+    relation_fig, relation_df = _hin_ka_bubble_figure(hin)
+    chart_items = figures[:]
+    if relation_fig is not None:
+        chart_items.append(("Crashes/KSI by HIN score range", relation_fig, relation_df))
+    if not chart_items:
+        st.info("HIN diagnostic charts need HIN priority index values.")
+        return
+    cols = st.columns(2)
+    for i, (title, fig, data) in enumerate(chart_items[:4]):
+        with cols[i % 2]:
+            fig.update_layout(height=_chart_height(), margin=dict(l=20, r=20, t=45, b=35))
+            st.plotly_chart(_polish_figure(fig), width="stretch", key=f"hin_diag_v40_{_safe_name(title)}_{i}")
+
+
+def _render_hin_network_summary(st, hin, crashes):
+    """Dashboard-only HIN summary with safer crash/KSI capture."""
+    if hin is None or getattr(hin, "empty", True):
+        return
+    metric = _dashboard_hin_metric(hin)
+    if not metric:
+        return
+    st.markdown("<div class='dashboard-section-title'>High Injury Network summary <span>custom HIN threshold, miles, crashes, and KSI (K+A) capture</span></div>", unsafe_allow_html=True)
+    work = hin.copy()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+
+    _render_crash_ksi_mapping_controls(st, crashes)
+
+    length_col = _dashboard_length_col(work)
+    if length_col:
+        work[length_col] = pd.to_numeric(work[length_col], errors="coerce").fillna(0)
+    else:
+        length_col = "__unit_length__"
+        work[length_col] = 1.0
+
+    mode_col, control_col, c_miles, c_crashes, c_ksi = st.columns([1.35, 1.05, 1, 1, 1])
+    method = mode_col.selectbox(
+        "High-risk network threshold",
+        ["Top percent of miles", "Top number of segments/windows", "HIN index threshold", "Above average HIN index", "Above median HIN index"],
+        index=0,
+        key="hin_summary_threshold_mode_v40",
+    )
+    top_percent = 10.0
+    top_n = 20
+    index_threshold = 50.0
+    with control_col:
+        if method == "Top percent of miles":
+            top_percent = st.number_input("Top percent", min_value=1.0, max_value=100.0, value=float(st.session_state.get("hin_summary_top_percent", 10.0)), step=1.0, key="hin_summary_top_percent")
+        elif method == "Top number of segments/windows":
+            top_n = st.number_input("Top N", min_value=1, max_value=max(int(len(work)), 1), value=min(20, max(int(len(work)), 1)), step=1, key="hin_summary_top_n")
+        elif method == "HIN index threshold":
+            index_threshold = st.number_input("Minimum HIN index", min_value=0.0, max_value=100.0, value=float(st.session_state.get("hin_summary_index_threshold", 50.0)), step=5.0, key="hin_summary_index_threshold")
+        elif method == "Above average HIN index":
+            st.metric("Average", f"{work[metric].mean():,.2f}")
+        elif method == "Above median HIN index":
+            st.metric("Median", f"{work[metric].median():,.2f}")
+
+    selected = _selected_hin_subset(work, metric, method, top_percent=top_percent, top_n=top_n, index_threshold=index_threshold)
+    total_mi = float(work[length_col].sum()) if work[length_col].sum() else float(len(work))
+    high_mi = float(selected[length_col].sum()) if not selected.empty else 0.0
+    pct_mi = high_mi / total_mi * 100 if total_mi else 0.0
+
+    crash_subset, capture_note = _selected_hin_crash_subset(selected, crashes)
+    total_crashes = _safe_unique_crash_count(crashes) if crashes is not None else 0
+    if crash_subset is not None:
+        high_crashes = _safe_unique_crash_count(crash_subset)
+        pct_crash = high_crashes / total_crashes * 100 if total_crashes else 0.0
+        crash_value = f"{high_crashes:,}"
+        crash_delta = f"{pct_crash:,.1f}% of assigned crashes"
+        high_ksi = _total_ka_from_crashes(crash_subset)
+        total_ksi = _total_ka_from_crashes(crashes)
+        pct_ksi = high_ksi / total_ksi * 100 if total_ksi else 0.0
+        ksi_value = f"{high_ksi:,}"
+        ksi_delta = f"{pct_ksi:,.1f}% of KSI (K+A)"
+    else:
+        count_col = _crash_count_col(selected)
+        if count_col and not selected.empty and total_crashes:
+            # Display row-based count as an estimate, capped only for the percent.
+            row_crashes = float(pd.to_numeric(selected[count_col], errors="coerce").fillna(0).sum())
+            pct_crash = min(row_crashes, total_crashes) / total_crashes * 100
+            crash_value = f"{row_crashes:,.0f}"
+            crash_delta = f"{pct_crash:,.1f}% of loaded crashes; row-based"
+        else:
+            crash_value = "N/A"
+            crash_delta = "No crash linkage"
+        ksi_value = "N/A"
+        ksi_delta = "Needs crash-to-HIN linkage"
+
+    c_miles.metric("High-risk miles", f"{high_mi:,.2f} mi", f"{pct_mi:,.1f}% of analyzed miles")
+    c_crashes.metric("Crashes on selected HIN", crash_value, crash_delta)
+    c_ksi.metric("KSI (K+A) on selected HIN", ksi_value, ksi_delta)
+
+    selected_display = _add_dashboard_rate_columns(selected, crashes=crashes)
+    with st.expander("Selected HIN summary rows", expanded=False):
+        preview_cols = []
+        for c in [
+            _normal_col(selected_display, ["RiskSegmentID", "WindowID", "SegmentID", "UnitID", "CorridorID"]),
+            _normal_col(selected_display, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"]),
+            _dashboard_length_col(selected_display), _crash_count_col(selected_display),
+            "KSI_Crashes_Dashboard", metric, "Dashboard_Analysis_Years", "Crash_per_Mile_per_Year", "KSI_per_Mile_per_Year",
+        ]:
+            if c and c in selected_display.columns and c not in preview_cols:
+                preview_cols.append(c)
+        if preview_cols:
+            st.dataframe(_safe_dataframe_for_display(selected_display[preview_cols].head(50)), width="stretch", hide_index=True)
+        else:
+            st.info("No displayable HIN rows are available for the selected threshold.")
+    years = _dashboard_year_count(crashes)
+    st.caption(
+        f"Crashes/mile/year uses the detected crash data year span: {years:g} year(s). {capture_note} "
+        "Dashboard controls summarize existing HIN results only; they do not recalculate HIN scores."
+    )
+    _render_hin_dashboard_charts(st, hin)
+
+
+def _hin_table_for_display(hin, metric, top_n=20):
+    """Decision table for top HIN windows/segments with safe display rates."""
+    if hin is None or getattr(hin, "empty", True) or metric not in hin.columns:
+        return pd.DataFrame()
+    crashes = None
+    try:
+        crashes = _available_tables(st).get("Assigned crashes", _available_tables(st).get("Uploaded crashes"))
+    except Exception:
+        crashes = None
+    work = _add_dashboard_rate_columns(hin.copy(), crashes=crashes)
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+    work = work.sort_values(metric, ascending=False).head(top_n).reset_index(drop=True)
+    id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
+    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "CorridorRoute", "RouteName_Calc", "Name"])
+    length_col = _dashboard_length_col(work)
+    from_col = _normal_col(work, ["FromMile", "From_Mile", "from_mile", "BeginMile", "StartMile", "WindowFromMile"])
+    to_col = _normal_col(work, ["ToMile", "To_Mile", "to_mile", "EndMile", "WindowToMile"])
+    count_col = _crash_count_col(work)
+    out = pd.DataFrame()
+    out["Rank"] = range(1, len(work) + 1)
+    out["SegID"] = work[id_col].astype(str).values if id_col else [f"HIN_{i + 1}" for i in range(len(work))]
+    out["Seg/window length"] = pd.to_numeric(work[length_col], errors="coerce").round(3).values if length_col else ""
+    out["From mile"] = pd.to_numeric(work[from_col], errors="coerce").round(3).values if from_col else ""
+    out["To mile"] = pd.to_numeric(work[to_col], errors="coerce").round(3).values if to_col else ""
+    out["Route"] = work[route_col].astype(str).values if route_col else ""
+    out["Crash count"] = pd.to_numeric(work[count_col], errors="coerce").fillna(0).round(0).astype(int).values if count_col else ""
+    if "KSI_Crashes_Dashboard" in work.columns:
+        out["KSI (K+A) crashes"] = pd.to_numeric(work["KSI_Crashes_Dashboard"], errors="coerce").fillna(0).round(0).astype(int).values
+    out["HIN index"] = pd.to_numeric(work[metric], errors="coerce").round(3).values
+    if "Crash_per_Mile" in work.columns:
+        out["Crashes/mile"] = pd.to_numeric(work["Crash_per_Mile"], errors="coerce").round(3).values
+    if "Crash_per_Mile_per_Year" in work.columns:
+        out["Crashes/mile/year"] = pd.to_numeric(work["Crash_per_Mile_per_Year"], errors="coerce").round(3).values
+    if "KSI_per_Mile_per_Year" in work.columns:
+        out["KSI (K+A)/mile/year"] = pd.to_numeric(work["KSI_per_Mile_per_Year"], errors="coerce").round(3).values
+    if "Dashboard_Analysis_Years" in work.columns:
+        out["Crash years used"] = pd.to_numeric(work["Dashboard_Analysis_Years"], errors="coerce").round(1).values
+    return out
+
+
+# --- V41 dashboard-only corrections: exact HIN crash/KSI counts by segment geometry ---
+# These helpers override earlier dashboard-only functions. They do not change any
+# workflow calculation result; they only calculate dashboard/report display fields
+# from existing HIN geometries and existing crash records.
+
+
+def _dashboard_hin_source_gdf(hin=None):
+    """Return the HIN GeoDataFrame from session when the dashboard table lost geometry."""
+    try:
+        if hin is not None and "geometry" in getattr(hin, "columns", []) and not getattr(hin, "empty", True):
+            return hin.copy()
+    except Exception:
+        pass
+
+    try:
+        results = st.session_state.get("section7_results") or {}
+        for key in ["risk_segments", "risk_windows", "risk_corridors"]:
+            gdf = results.get(key)
+            if gdf is not None and not getattr(gdf, "empty", True) and "geometry" in gdf.columns:
+                if hin is None or len(gdf) == len(hin) or key == "risk_segments":
+                    return gdf.copy()
+    except Exception:
+        pass
+
+    return hin.copy() if hin is not None else pd.DataFrame()
+
+
+def _dashboard_crashes_source_gdf(crashes=None):
+    """Return crash GeoDataFrame for HIN dashboard counting.
+
+    Prefer the sliding-window assigned crashes because they are the exact crash
+    records used by the HIN workflow. Fall back to other existing crash tables.
+    """
+    candidates = []
+    try:
+        results = st.session_state.get("section7_results") or {}
+        candidates.append(results.get("assigned_crashes"))
+    except Exception:
+        pass
+    try:
+        candidates.append(st.session_state.get("section7_crashes_for_map"))
+    except Exception:
+        pass
+    try:
+        candidates.append(st.session_state.get("assigned_crashes"))
+    except Exception:
+        pass
+    try:
+        candidates.append(st.session_state.get("crashes"))
+    except Exception:
+        pass
+    candidates.append(crashes)
+
+    for cand in candidates:
+        try:
+            if cand is not None and not getattr(cand, "empty", True) and "geometry" in cand.columns:
+                return cand.copy()
+        except Exception:
+            pass
+    return crashes.copy() if crashes is not None else pd.DataFrame()
+
+
+def _strict_hin_ksi_series(df):
+    """Do not infer KSI from HIN/window score rows.
+
+    KSI (K+A) must come from crash-level severity records, not from HIN row
+    fields, because HIN rows can contain window scores or duplicated summaries.
+    """
+    if df is None or getattr(df, "empty", True):
+        return pd.Series(dtype="float64")
+    return pd.Series([0] * len(df), index=df.index, dtype="float64")
+
+
+def _hin_ka_series(df):
+    return _strict_hin_ksi_series(df)
+
+
+def _render_crash_ksi_mapping_controls(st, crashes):
+    """KSI mapping removed.
+
+    The dashboard now uses crash-level KABCO/severity fields already available
+    from the workflow. This avoids asking users to map non-existent combined
+    KSI columns and prevents accidental use of injury-count fields as crash
+    counts.
+    """
+    return
+
+
+def _crash_level_ksi_series(crashes):
+    """Return one 0/1 KSI flag per crash row, preferring KABCO/severity.
+
+    KSI means crashes with severity K or A. We intentionally do not sum generic
+    injury-count columns such as serious-injury persons, because the dashboard
+    card needs KSI crash count, not number of injured people.
+    """
+    if crashes is None or getattr(crashes, "empty", True):
+        return pd.Series(dtype="float64")
+
+    work = crashes.copy()
+
+    # Prefer a KABCO/severity column. This matches the crash summary KPI logic.
+    kabco = _kabco_col(work)
+    if kabco and kabco in work.columns:
+        vals = work[kabco].map(normalize_kabco_value).astype(str).str.upper()
+        return vals.isin(["K", "A"]).astype(int)
+
+    # Fallback only for explicit per-crash K/A indicator columns, not injury totals.
+    k_col = _normal_col(work, ["K_Crash", "K_Crashes", "Fatal_Crash", "Fatal_Crashes", "Crash_K", "Is_K"])
+    a_col = _normal_col(work, ["A_Crash", "A_Crashes", "Serious_Injury_Crash", "Serious_Injury_Crashes", "Crash_A", "Is_A"])
+    if k_col or a_col:
+        k = pd.to_numeric(work[k_col], errors="coerce").fillna(0) if k_col else 0
+        a = pd.to_numeric(work[a_col], errors="coerce").fillna(0) if a_col else 0
+        out = pd.to_numeric(k + a, errors="coerce").fillna(0)
+        return (out > 0).astype(int)
+
+    return pd.Series([0] * len(work), index=work.index, dtype="float64")
+
+
+def _total_ka_from_crashes(crashes):
+    vals = _crash_level_ksi_series(crashes)
+    if vals is None or len(vals) == 0:
+        return 0
+    return int(pd.to_numeric(vals, errors="coerce").fillna(0).sum())
+
+
+def _dashboard_hin_row_id_col(df):
+    return "__Dashboard_HIN_RowID__"
+
+
+def _prepare_hin_gdf_for_counting(hin):
+    gdf = _dashboard_hin_source_gdf(hin)
+    if gdf is None or getattr(gdf, "empty", True):
+        return gdf
+    gdf = gdf.copy().reset_index(drop=True)
+    gdf[_dashboard_hin_row_id_col(gdf)] = range(len(gdf))
+    return gdf
+
+
+def _dashboard_hin_crash_join(hin, crashes=None):
+    """Assign each crash to one nearest HIN row for dashboard-only counts."""
+    if gpd is None:
+        return pd.DataFrame()
+
+    hin_gdf = _prepare_hin_gdf_for_counting(hin)
+    crash_gdf = _dashboard_crashes_source_gdf(crashes)
+
+    if hin_gdf is None or getattr(hin_gdf, "empty", True) or "geometry" not in hin_gdf.columns:
+        return pd.DataFrame()
+    if crash_gdf is None or getattr(crash_gdf, "empty", True) or "geometry" not in crash_gdf.columns:
+        return pd.DataFrame()
+
+    try:
+        if hin_gdf.crs is None:
+            hin_gdf = hin_gdf.set_crs(4326, allow_override=True)
+        if crash_gdf.crs is None:
+            crash_gdf = crash_gdf.set_crs(4326, allow_override=True)
+        hin_m = hin_gdf.to_crs(epsg=3857)
+        crash_m = crash_gdf.to_crs(epsg=3857)
+    except Exception:
+        return pd.DataFrame()
+
+    row_id = _dashboard_hin_row_id_col(hin_m)
+    snap_ft = float(st.session_state.get("section7_crash_snap_dist_ft", 150.0))
+    snap_m = snap_ft * 0.3048
+
+    keep_cols = [row_id, "geometry"]
+    try:
+        joined = gpd.sjoin_nearest(
+            crash_m,
+            hin_m[keep_cols],
+            how="inner",
+            max_distance=snap_m,
+            distance_col="Dashboard_DistToHIN_M",
+        )
+    except Exception:
+        return pd.DataFrame()
+
+    if joined is None or joined.empty:
+        return pd.DataFrame()
+
+    # Preserve one row per crash. sjoin_nearest can return ties; keep nearest/first.
+    cid = _dashboard_crash_id_col(joined) or "__Dashboard_Crash_RowID__"
+    if cid == "__Dashboard_Crash_RowID__":
+        joined[cid] = range(len(joined))
+    if "Dashboard_DistToHIN_M" in joined.columns:
+        joined = joined.sort_values("Dashboard_DistToHIN_M")
+    joined = joined.drop_duplicates(subset=[cid], keep="first").copy()
+    joined["Dashboard_KSI_Flag"] = pd.to_numeric(_crash_level_ksi_series(joined), errors="coerce").fillna(0).astype(int).values
+    return joined
+
+
+def _hin_row_crash_stats(hin, crashes=None):
+    """Return exact dashboard crash/KSI counts for each HIN row."""
+    hin_gdf = _prepare_hin_gdf_for_counting(hin)
+    if hin_gdf is None or getattr(hin_gdf, "empty", True):
+        return pd.DataFrame()
+    row_id = _dashboard_hin_row_id_col(hin_gdf)
+    base = pd.DataFrame({row_id: hin_gdf[row_id].values})
+
+    joined = _dashboard_hin_crash_join(hin_gdf, crashes=crashes)
+    if joined is None or joined.empty or row_id not in joined.columns:
+        base["Dashboard_Crash_Count"] = 0
+        base["KSI_Crashes_Dashboard"] = 0
+        return base
+
+    cid = _dashboard_crash_id_col(joined) or "__Dashboard_Crash_RowID__"
+    if cid not in joined.columns:
+        joined[cid] = range(len(joined))
+
+    grouped = joined.groupby(row_id, dropna=False).agg(
+        Dashboard_Crash_Count=(cid, "nunique"),
+        KSI_Crashes_Dashboard=("Dashboard_KSI_Flag", "sum"),
+    ).reset_index()
+
+    out = base.merge(grouped, on=row_id, how="left")
+    out["Dashboard_Crash_Count"] = pd.to_numeric(out["Dashboard_Crash_Count"], errors="coerce").fillna(0).astype(int)
+    out["KSI_Crashes_Dashboard"] = pd.to_numeric(out["KSI_Crashes_Dashboard"], errors="coerce").fillna(0).astype(int)
+    return out
+
+
+def _add_dashboard_rate_columns(df, crashes=None):
+    """Add display-only exact crash/mile/year and KSI/mile/year fields.
+
+    For HIN rows with geometry, crash count and KSI are counted by assigning
+    existing crash records to the nearest HIN segment/window. This fixes the
+    previous dashboard issue where HIN window scores were mislabeled as segment
+    crash totals.
+    """
+    if df is None or getattr(df, "empty", True):
+        return df
+
+    work_src = _dashboard_hin_source_gdf(df)
+    out = work_src.copy().reset_index(drop=True)
+    row_id = _dashboard_hin_row_id_col(out)
+    out[row_id] = range(len(out))
+
+    crash_source = _dashboard_crashes_source_gdf(crashes)
+    stats = _hin_row_crash_stats(out, crashes=crash_source)
+    if stats is not None and not stats.empty:
+        out = out.drop(columns=["Dashboard_Crash_Count", "KSI_Crashes_Dashboard"], errors="ignore")
+        out = out.merge(stats, on=row_id, how="left")
+    else:
+        out["Dashboard_Crash_Count"] = 0
+        out["KSI_Crashes_Dashboard"] = 0
+
+    out["Dashboard_Crash_Count"] = pd.to_numeric(out["Dashboard_Crash_Count"], errors="coerce").fillna(0).astype(int)
+    out["KSI_Crashes_Dashboard"] = pd.to_numeric(out["KSI_Crashes_Dashboard"], errors="coerce").fillna(0).astype(int)
+
+    years = _dashboard_year_count(crash_source)
+    out["Dashboard_Analysis_Years"] = years
+
+    length_col = _dashboard_length_col(out)
+    if length_col:
+        length = pd.to_numeric(out[length_col], errors="coerce").replace(0, pd.NA)
+        out["Crash_per_Mile"] = (out["Dashboard_Crash_Count"] / length).astype("float64").replace([float("inf"), -float("inf")], 0).fillna(0).round(3)
+        out["Crash_per_Mile_per_Year"] = (out["Dashboard_Crash_Count"] / length / years).astype("float64").replace([float("inf"), -float("inf")], 0).fillna(0).round(3)
+        out["KSI_per_Mile_per_Year"] = (out["KSI_Crashes_Dashboard"] / length / years).astype("float64").replace([float("inf"), -float("inf")], 0).fillna(0).round(3)
+
+    return out
+
+
+def _selected_hin_crash_subset(selected_hin, crashes):
+    """Return unique crash records assigned to selected HIN geometry."""
+    joined = _dashboard_hin_crash_join(selected_hin, crashes=crashes)
+    if joined is None or joined.empty:
+        return pd.DataFrame(), "Dashboard counted crashes by spatially assigning existing crash records to selected HIN rows; no crashes matched the selected HIN within the snap distance."
+    cid = _dashboard_crash_id_col(joined) or "__Dashboard_Crash_RowID__"
+    if cid not in joined.columns:
+        joined[cid] = range(len(joined))
+    subset = joined.drop_duplicates(subset=[cid], keep="first").copy()
+    return subset, "Dashboard counted unique crashes by assigning existing crash records to the selected HIN segment/window geometries."
+
+
+def _hin_ka_bubble_figure(hin):
+    """Simple scatter: KSI crash count versus HIN priority index."""
+    if hin is None or getattr(hin, "empty", True):
+        return None, pd.DataFrame()
+    metric = _dashboard_hin_metric(hin)
+    if not metric:
+        return None, pd.DataFrame()
+
+    crashes = _dashboard_crashes_source_gdf(None)
+    work = _add_dashboard_rate_columns(hin, crashes=crashes)
+    if work is None or getattr(work, "empty", True) or metric not in work.columns:
+        return None, pd.DataFrame()
+
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+    work["KSI (K+A) crashes"] = pd.to_numeric(work.get("KSI_Crashes_Dashboard", 0), errors="coerce").fillna(0).astype(int)
+    work["Crash count"] = pd.to_numeric(work.get("Dashboard_Crash_Count", 0), errors="coerce").fillna(0).astype(int)
+
+    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "CorridorRoute", "RouteName_Calc", "Name"])
+    id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
+    length_col = _dashboard_length_col(work)
+    hover_cols = [c for c in [id_col, route_col, length_col, "Crash count", "KSI (K+A) crashes"] if c and c in work.columns]
+
+    fig = px.scatter(
+        work,
+        x=metric,
+        y="KSI (K+A) crashes",
+        hover_data=hover_cols,
+        title="KSI (K+A) crashes vs HIN priority index",
+    )
+    fig.update_traces(marker=dict(size=8, opacity=0.65))
+    fig.update_layout(xaxis_title="HIN priority index", yaxis_title="KSI (K+A) crash count")
+    return _polish_figure(fig), work[[c for c in [metric, "KSI (K+A) crashes", "Crash count", route_col, id_col] if c and c in work.columns]].copy()
+
+
+def _render_hin_dashboard_charts(st, hin):
+    if hin is None or getattr(hin, "empty", True):
+        return
+    st.markdown(
+        "<div class='dashboard-section-title'>HIN index diagnostics <span>distribution, route average/median comparison, and KSI scatter</span></div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "These charts use existing HIN result rows. They are not affected by the Step 4 map display choice such as above-average or above-median."
+    )
+    figures = _hin_distribution_figures(_dashboard_hin_source_gdf(hin))
+    scatter_fig, scatter_df = _hin_ka_bubble_figure(hin)
+    chart_items = figures[:]
+    if scatter_fig is not None:
+        chart_items.append(("KSI scatter", scatter_fig, scatter_df))
+    if not chart_items:
+        st.info("HIN diagnostic charts need HIN priority index values.")
+        return
+    cols = st.columns(2)
+    for i, (title, fig, data) in enumerate(chart_items[:4]):
+        with cols[i % 2]:
+            fig.update_layout(height=_chart_height(), margin=dict(l=20, r=20, t=45, b=35))
+            st.plotly_chart(_polish_figure(fig), width="stretch", key=f"hin_diag_v41_{_safe_name(title)}_{i}")
+
+
+def _render_hin_network_summary(st, hin, crashes):
+    """Dashboard HIN summary using exact crash/KSI counts from selected geometries."""
+    if hin is None or getattr(hin, "empty", True):
+        return
+    metric = _dashboard_hin_metric(hin)
+    if not metric:
+        return
+
+    st.markdown("<div class='dashboard-section-title'>High Injury Network summary <span>custom HIN threshold, miles, crashes, and KSI (K+A) capture</span></div>", unsafe_allow_html=True)
+    work = _dashboard_hin_source_gdf(hin).copy()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+
+    length_col = _dashboard_length_col(work)
+    if length_col:
+        work[length_col] = pd.to_numeric(work[length_col], errors="coerce").fillna(0)
+    else:
+        length_col = "__unit_length__"
+        work[length_col] = 1.0
+
+    mode_col, control_col, c_miles, c_crashes, c_ksi = st.columns([1.35, 1.05, 1, 1, 1])
+    method = mode_col.selectbox(
+        "High-risk network threshold",
+        ["Top percent of miles", "Top number of segments/windows", "HIN index threshold", "Above average HIN index", "Above median HIN index"],
+        index=0,
+        key="hin_summary_threshold_mode_v41",
+    )
+    top_percent = 10.0
+    top_n = 20
+    index_threshold = 50.0
+    with control_col:
+        if method == "Top percent of miles":
+            top_percent = st.number_input("Top percent", min_value=1.0, max_value=100.0, value=float(st.session_state.get("hin_summary_top_percent", 10.0)), step=1.0, key="hin_summary_top_percent")
+        elif method == "Top number of segments/windows":
+            top_n = st.number_input("Top N", min_value=1, max_value=max(int(len(work)), 1), value=min(20, max(int(len(work)), 1)), step=1, key="hin_summary_top_n_v41")
+        elif method == "HIN index threshold":
+            index_threshold = st.number_input("Minimum HIN index", min_value=0.0, max_value=100.0, value=float(st.session_state.get("hin_summary_index_threshold", 50.0)), step=5.0, key="hin_summary_index_threshold")
+        elif method == "Above average HIN index":
+            st.metric("Average", f"{work[metric].mean():,.2f}")
+        elif method == "Above median HIN index":
+            st.metric("Median", f"{work[metric].median():,.2f}")
+
+    selected = _selected_hin_subset(work, metric, method, top_percent=top_percent, top_n=top_n, index_threshold=index_threshold)
+    total_mi = float(work[length_col].sum()) if work[length_col].sum() else float(len(work))
+    high_mi = float(selected[length_col].sum()) if not selected.empty else 0.0
+    pct_mi = high_mi / total_mi * 100 if total_mi else 0.0
+
+    crash_source = _dashboard_crashes_source_gdf(crashes)
+    crash_subset, capture_note = _selected_hin_crash_subset(selected, crash_source)
+    total_crashes = _safe_unique_crash_count(crash_source)
+    high_crashes = _safe_unique_crash_count(crash_subset)
+    pct_crash = high_crashes / total_crashes * 100 if total_crashes else 0.0
+
+    total_ksi = _total_ka_from_crashes(crash_source)
+    high_ksi = _total_ka_from_crashes(crash_subset)
+    pct_ksi = high_ksi / total_ksi * 100 if total_ksi else 0.0
+
+    c_miles.metric("High-risk miles", f"{high_mi:,.2f} mi", f"{pct_mi:,.1f}% of analyzed miles")
+    c_crashes.metric("Crashes on selected HIN", f"{high_crashes:,}", f"{pct_crash:,.1f}% of loaded HIN crashes")
+    c_ksi.metric("KSI (K+A) on selected HIN", f"{high_ksi:,}", f"{pct_ksi:,.1f}% of KSI (K+A)")
+
+    selected_display = _add_dashboard_rate_columns(selected, crashes=crash_source)
+    with st.expander("Selected HIN summary rows", expanded=False):
+        preview_cols = []
+        for c in [
+            _normal_col(selected_display, ["RiskSegmentID", "WindowID", "SegmentID", "UnitID", "CorridorID"]),
+            _normal_col(selected_display, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"]),
+            _dashboard_length_col(selected_display), "Dashboard_Crash_Count", "KSI_Crashes_Dashboard",
+            metric, "Dashboard_Analysis_Years", "Crash_per_Mile_per_Year", "KSI_per_Mile_per_Year",
+        ]:
+            if c and c in selected_display.columns and c not in preview_cols:
+                preview_cols.append(c)
+        if preview_cols:
+            st.dataframe(_safe_dataframe_for_display(selected_display[preview_cols].head(50)), width="stretch", hide_index=True)
+        else:
+            st.info("No displayable HIN rows are available for the selected threshold.")
+
+    years = _dashboard_year_count(crash_source)
+    st.caption(
+        f"Crashes/mile/year uses the detected crash data year span: {years:g} year(s). {capture_note} "
+        "Dashboard controls summarize existing HIN results only; they do not recalculate HIN scores."
+    )
+    _render_hin_dashboard_charts(st, work)
+
+
+def _hin_table_for_display(hin, metric, top_n=20):
+    """Decision table for top HIN rows with exact dashboard crash/KSI counts."""
+    if hin is None or getattr(hin, "empty", True) or metric not in hin.columns:
+        return pd.DataFrame()
+    crash_source = _dashboard_crashes_source_gdf(None)
+    work = _add_dashboard_rate_columns(hin.copy(), crashes=crash_source)
+    if metric not in work.columns:
+        return pd.DataFrame()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+    work = work.sort_values(metric, ascending=False).head(top_n).reset_index(drop=True)
+
+    id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
+    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "CorridorRoute", "RouteName_Calc", "Name"])
+    length_col = _dashboard_length_col(work)
+    from_col = _normal_col(work, ["FromMile", "From_Mile", "from_mile", "BeginMile", "StartMile", "WindowFromMile", "Win_From_Mi"])
+    to_col = _normal_col(work, ["ToMile", "To_Mile", "to_mile", "EndMile", "WindowToMile", "Win_To_Mi"])
+
+    out = pd.DataFrame()
+    out["Rank"] = range(1, len(work) + 1)
+    out["SegID"] = work[id_col].astype(str).values if id_col else [f"HIN_{i + 1}" for i in range(len(work))]
+    out["Seg/window length"] = pd.to_numeric(work[length_col], errors="coerce").round(3).values if length_col else ""
+    out["From mile"] = pd.to_numeric(work[from_col], errors="coerce").round(3).values if from_col else ""
+    out["To mile"] = pd.to_numeric(work[to_col], errors="coerce").round(3).values if to_col else ""
+    out["Route"] = work[route_col].astype(str).values if route_col else ""
+    out["Crash count"] = pd.to_numeric(work["Dashboard_Crash_Count"], errors="coerce").fillna(0).round(0).astype(int).values if "Dashboard_Crash_Count" in work.columns else ""
+    out["KSI (K+A) crashes"] = pd.to_numeric(work["KSI_Crashes_Dashboard"], errors="coerce").fillna(0).round(0).astype(int).values if "KSI_Crashes_Dashboard" in work.columns else ""
+    out["HIN index"] = pd.to_numeric(work[metric], errors="coerce").round(3).values
+    if "Crash_per_Mile" in work.columns:
+        out["Crashes/mile"] = pd.to_numeric(work["Crash_per_Mile"], errors="coerce").round(3).values
+    if "Crash_per_Mile_per_Year" in work.columns:
+        out["Crashes/mile/year"] = pd.to_numeric(work["Crash_per_Mile_per_Year"], errors="coerce").round(3).values
+    if "KSI_per_Mile_per_Year" in work.columns:
+        out["KSI (K+A)/mile/year"] = pd.to_numeric(work["KSI_per_Mile_per_Year"], errors="coerce").round(3).values
+    if "Dashboard_Analysis_Years" in work.columns:
+        out["Crash years used"] = pd.to_numeric(work["Dashboard_Analysis_Years"], errors="coerce").round(1).values
+    return out
+
+
+# --- V42 dashboard-only corrections: use actual sliding-window rows for HIN dashboard ---
+# The HIN dashboard/ranking should summarize the sliding windows created by
+# modules/sliding_window.py.  It should not re-snap crashes to the display
+# lines, because window/segment line geometries can produce zero matches when
+# points are not exactly on the line.  Instead, use the module outputs:
+#   section7_results["risk_windows"]      -> each window, with window score/count
+#   section7_results["assigned_crashes"]  -> crash records snapped to route with Route_Pos_M
+# This does not change the sliding-window calculation; it only displays its
+# existing outputs with additional KSI/rate fields.
+
+
+def _section7_results_for_dashboard():
+    try:
+        return st.session_state.get("section7_results") or {}
+    except Exception:
+        return {}
+
+
+def _section7_route_col_from_tables(windows=None, crashes=None):
+    route_session = None
+    try:
+        route_session = st.session_state.get("section7_route_col_s7") or st.session_state.get("route_col")
+    except Exception:
+        route_session = None
+    candidates = [route_session, "Route", "FULLNAME", "RouteName", "RouteName_Calc", "RoadName", "Name"]
+    for table in [windows, crashes]:
+        if table is None or getattr(table, "empty", True):
+            continue
+        for col in candidates:
+            if col and col in table.columns:
+                return col
+    return None
+
+
+def _dashboard_hin_source_gdf(hin=None):
+    """Prefer the real sliding-window rows for dashboard HIN summaries.
+
+    The user-facing HIN ranking represents windows, so use risk_windows when it
+    exists.  Fall back to the supplied table or risk_segments only when windows
+    are unavailable.
+    """
+    results = _section7_results_for_dashboard()
+    for key in ["risk_windows", "risk_segments", "risk_corridors"]:
+        try:
+            gdf = results.get(key)
+            if gdf is not None and not getattr(gdf, "empty", True):
+                return gdf.copy()
+        except Exception:
+            pass
+    try:
+        if hin is not None and not getattr(hin, "empty", True):
+            return hin.copy()
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def _dashboard_length_col(df):
+    return _normal_col(
+        df,
+        [
+            "Window_Length_Mi",
+            "WindowLength_Miles",
+            "Length_Miles",
+            "Length_Mi",
+            "Seg_Length_Mi",
+            "SegmentLength_Mile",
+            "CorridorLength_Mile",
+            "CorridorLength_Miles",
+            "length_mi",
+            "Miles",
+        ],
+    )
+
+
+def _dashboard_hin_metric(hin):
+    if hin is None or getattr(hin, "empty", True):
+        return None
+    for col in ["HIN_Priority_Index", "Risk_Score", "Window_HIN_Index"]:
+        if col in hin.columns:
+            return col
+    if "Window_Score" in hin.columns:
+        return "Window_Score"
+    return _default_metric(_numeric_cols(hin))
+
+
+def _window_hin_index_series(windows):
+    if windows is None or getattr(windows, "empty", True):
+        return pd.Series(dtype="float64")
+    if "HIN_Priority_Index" in windows.columns:
+        return pd.to_numeric(windows["HIN_Priority_Index"], errors="coerce").fillna(0)
+    score_col = "Window_Score" if "Window_Score" in windows.columns else _dashboard_hin_metric(windows)
+    if not score_col or score_col not in windows.columns:
+        return pd.Series([0] * len(windows), index=windows.index, dtype="float64")
+    score = pd.to_numeric(windows[score_col], errors="coerce").fillna(0)
+    max_score = float(score.max()) if len(score) else 0.0
+    if max_score <= 0:
+        return pd.Series([0] * len(windows), index=windows.index, dtype="float64")
+    return score / max_score * 100.0
+
+
+def _prepare_window_dashboard_table(hin=None, crashes=None):
+    """Return HIN windows with crash count, KSI, HIN index, and rates.
+
+    Crash count is the window Crash_Count generated by modules/sliding_window.py.
+    KSI is counted from section7 assigned crash records whose Route_Pos_M falls
+    inside the window on the same route.  This matches the sliding-window process
+    and avoids a second geometry snap in the dashboard.
+    """
+    windows = _dashboard_hin_source_gdf(hin)
+    if windows is None or getattr(windows, "empty", True):
+        return pd.DataFrame()
+
+    work = windows.copy().reset_index(drop=True)
+    metric_existing = _dashboard_hin_metric(work)
+    work["Dashboard_HIN_Index"] = _window_hin_index_series(work).values
+    if "HIN_Priority_Index" not in work.columns:
+        work["HIN_Priority_Index"] = work["Dashboard_HIN_Index"]
+
+    if "Dashboard_Crash_Count" not in work.columns:
+        if "Crash_Count" in work.columns:
+            work["Dashboard_Crash_Count"] = pd.to_numeric(work["Crash_Count"], errors="coerce").fillna(0).astype(int)
+        elif "CrashCount" in work.columns:
+            work["Dashboard_Crash_Count"] = pd.to_numeric(work["CrashCount"], errors="coerce").fillna(0).astype(int)
+        else:
+            work["Dashboard_Crash_Count"] = 0
+
+    work["KSI_Crashes_Dashboard"] = 0
+
+    results = _section7_results_for_dashboard()
+    assigned = crashes
+    if assigned is None or getattr(assigned, "empty", True):
+        assigned = results.get("assigned_crashes")
+    if assigned is None or getattr(assigned, "empty", True):
+        assigned = _dashboard_crashes_source_gdf(crashes)
+
+    route_col = _section7_route_col_from_tables(work, assigned)
+
+    if (
+        assigned is not None
+        and not getattr(assigned, "empty", True)
+        and route_col
+        and route_col in work.columns
+        and route_col in assigned.columns
+        and "Route_Pos_M" in assigned.columns
+        and "Win_Start_M" in work.columns
+        and "Win_End_M" in work.columns
+    ):
+        ac = assigned.copy()
+        ac["Dashboard_KSI_Flag"] = pd.to_numeric(_crash_level_ksi_series(ac), errors="coerce").fillna(0).astype(int).values
+        ac["Route_Pos_M"] = pd.to_numeric(ac["Route_Pos_M"], errors="coerce")
+        work["Win_Start_M"] = pd.to_numeric(work["Win_Start_M"], errors="coerce")
+        work["Win_End_M"] = pd.to_numeric(work["Win_End_M"], errors="coerce")
+
+        ksi_counts = []
+        # Keep module crash counts for Crash_Count.  KSI is dashboard-only.
+        for _, row in work.iterrows():
+            route_value = row.get(route_col)
+            start_m = row.get("Win_Start_M")
+            end_m = row.get("Win_End_M")
+            if pd.isna(start_m) or pd.isna(end_m):
+                ksi_counts.append(0)
+                continue
+            mask = (
+                ac[route_col].astype(str).eq(str(route_value))
+                & (ac["Route_Pos_M"] >= float(start_m))
+                & (ac["Route_Pos_M"] < float(end_m))
+            )
+            ksi_counts.append(int(ac.loc[mask, "Dashboard_KSI_Flag"].sum()))
+        work["KSI_Crashes_Dashboard"] = ksi_counts
+
+    years = _dashboard_year_count(assigned)
+    work["Dashboard_Analysis_Years"] = years
+    length_col = _dashboard_length_col(work)
+    if length_col:
+        length = pd.to_numeric(work[length_col], errors="coerce").replace(0, pd.NA)
+        work["Crash_per_Mile"] = (pd.to_numeric(work["Dashboard_Crash_Count"], errors="coerce").fillna(0) / length).astype("float64").replace([float("inf"), -float("inf")], 0).fillna(0).round(3)
+        work["Crash_per_Mile_per_Year"] = (pd.to_numeric(work["Dashboard_Crash_Count"], errors="coerce").fillna(0) / length / years).astype("float64").replace([float("inf"), -float("inf")], 0).fillna(0).round(3)
+        work["KSI_per_Mile_per_Year"] = (pd.to_numeric(work["KSI_Crashes_Dashboard"], errors="coerce").fillna(0) / length / years).astype("float64").replace([float("inf"), -float("inf")], 0).fillna(0).round(3)
+
+    return work
+
+
+def _add_dashboard_rate_columns(df, crashes=None):
+    """Dashboard display fields only; use sliding-window outputs when present."""
+    prepared = _prepare_window_dashboard_table(df, crashes=crashes)
+    if prepared is not None and not getattr(prepared, "empty", True):
+        return prepared
+    return df
+
+
+def _selected_hin_crash_subset(selected_hin, crashes):
+    """Return unique crash records falling inside selected sliding windows."""
+    if selected_hin is None or getattr(selected_hin, "empty", True):
+        return pd.DataFrame(), "No selected HIN windows."
+
+    results = _section7_results_for_dashboard()
+    assigned = crashes
+    if assigned is None or getattr(assigned, "empty", True):
+        assigned = results.get("assigned_crashes")
+    if assigned is None or getattr(assigned, "empty", True):
+        return pd.DataFrame(), "No sliding-window assigned crash table was available."
+
+    route_col = _section7_route_col_from_tables(selected_hin, assigned)
+    if not route_col or route_col not in selected_hin.columns or route_col not in assigned.columns:
+        return pd.DataFrame(), "Selected-HIN crash capture needs a route column in both selected windows and assigned crashes."
+    if "Route_Pos_M" not in assigned.columns or "Win_Start_M" not in selected_hin.columns or "Win_End_M" not in selected_hin.columns:
+        return pd.DataFrame(), "Selected-HIN crash capture needs Route_Pos_M plus window start/end fields."
+
+    ac = assigned.copy()
+    ac["Route_Pos_M"] = pd.to_numeric(ac["Route_Pos_M"], errors="coerce")
+    pieces = []
+    for _, row in selected_hin.iterrows():
+        start_m = pd.to_numeric(row.get("Win_Start_M"), errors="coerce")
+        end_m = pd.to_numeric(row.get("Win_End_M"), errors="coerce")
+        if pd.isna(start_m) or pd.isna(end_m):
+            continue
+        mask = (
+            ac[route_col].astype(str).eq(str(row.get(route_col)))
+            & (ac["Route_Pos_M"] >= float(start_m))
+            & (ac["Route_Pos_M"] < float(end_m))
+        )
+        if mask.any():
+            pieces.append(ac.loc[mask].copy())
+
+    if not pieces:
+        return pd.DataFrame(), "No crash records fell inside the selected HIN windows."
+
+    subset = pd.concat(pieces, ignore_index=True)
+    cid = _dashboard_crash_id_col(subset) or "CrashID_S7"
+    if cid not in subset.columns:
+        subset["CrashID_S7"] = range(1, len(subset) + 1)
+        cid = "CrashID_S7"
+    subset = subset.drop_duplicates(subset=[cid], keep="first").copy()
+    return subset, "Dashboard counted unique crash records whose route position falls inside the selected sliding windows."
+
+
+def _safe_unique_crash_count(crashes):
+    if crashes is None or getattr(crashes, "empty", True):
+        return 0
+    cid = _dashboard_crash_id_col(crashes) or "CrashID_S7"
+    if cid in crashes.columns:
+        return int(crashes[cid].dropna().astype(str).nunique())
+    return int(len(crashes))
+
+
+def _hin_distribution_figures(hin):
+    """HIN score distribution by score range.
+
+    Y-axis is the number of windows/segments in each HIN index range. This is
+    the clearer replacement for the earlier percentile curve.
+    """
+    figures = []
+    work = _prepare_window_dashboard_table(hin)
+    if work is None or getattr(work, "empty", True):
+        return figures
+    metric = "HIN_Priority_Index" if "HIN_Priority_Index" in work.columns else _dashboard_hin_metric(work)
+    if not metric or metric not in work.columns:
+        return figures
+    values = pd.to_numeric(work[metric], errors="coerce").fillna(0).clip(lower=0, upper=100)
+    bins = list(range(0, 105, 5))
+    labels = [f"{i}-{i + 5}" for i in bins[:-1]]
+    dist = pd.DataFrame({"HIN score range": pd.cut(values, bins=bins, labels=labels, include_lowest=True, right=True)})
+    dist = dist.groupby("HIN score range", observed=False).size().reset_index(name="Window/segment count")
+    dist["HIN score midpoint"] = [i + 2.5 for i in bins[:-1]]
+    fig = px.line(
+        dist,
+        x="HIN score midpoint",
+        y="Window/segment count",
+        markers=True,
+        title="HIN index distribution by score range",
+    )
+    fig.update_layout(
+        xaxis_title="HIN priority index range",
+        yaxis_title="Number of windows/segments",
+    )
+    figures.append(("HIN index distribution by score range", _polish_figure(fig), dist))
+
+    route_col = _section7_route_col_from_tables(work, None)
+    if route_col and route_col in work.columns:
+        route_stats = work.copy()
+        route_stats[metric] = pd.to_numeric(route_stats[metric], errors="coerce").fillna(0)
+        route_stats = route_stats.groupby(route_col, dropna=False)[metric].agg(["mean", "median"]).reset_index()
+        route_stats = route_stats.sort_values("mean", ascending=False).head(15)
+        route_stats["Average HIN"] = -route_stats["mean"]
+        route_stats["Median HIN"] = route_stats["median"]
+        plot_df = route_stats[[route_col, "Average HIN", "Median HIN"]].copy()
+        long_df = plot_df.melt(id_vars=[route_col], value_vars=["Average HIN", "Median HIN"], var_name="Metric", value_name="Value")
+        fig2 = px.bar(long_df, x="Value", y=route_col, color="Metric", orientation="h", title="Average and median HIN by route")
+        fig2.update_layout(xaxis_title="HIN priority index (average shown left, median right)", yaxis_title="Route", barmode="relative")
+        figures.append(("Average and median HIN by route", _polish_figure(fig2), route_stats))
+    return figures
+
+
+def _hin_ka_bubble_figure(hin):
+    """Simple scatter: each window/segment is one point."""
+    work = _prepare_window_dashboard_table(hin)
+    if work is None or getattr(work, "empty", True):
+        return None, pd.DataFrame()
+    metric = "HIN_Priority_Index" if "HIN_Priority_Index" in work.columns else _dashboard_hin_metric(work)
+    if not metric or metric not in work.columns:
+        return None, pd.DataFrame()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+    work["KSI (K+A) crashes"] = pd.to_numeric(work.get("KSI_Crashes_Dashboard", 0), errors="coerce").fillna(0).astype(int)
+    work["Crash count"] = pd.to_numeric(work.get("Dashboard_Crash_Count", 0), errors="coerce").fillna(0).astype(int)
+    route_col = _section7_route_col_from_tables(work, None)
+    id_col = _normal_col(work, ["SegID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
+    length_col = _dashboard_length_col(work)
+    hover_cols = [c for c in [id_col, route_col, length_col, "Crash count", "KSI (K+A) crashes", "Win_From_Mi", "Win_To_Mi"] if c and c in work.columns]
+    fig = px.scatter(
+        work,
+        x=metric,
+        y="KSI (K+A) crashes",
+        hover_data=hover_cols,
+        title="KSI (K+A) crashes vs HIN priority index",
+    )
+    fig.update_traces(marker=dict(size=7, opacity=0.65))
+    fig.update_layout(xaxis_title="HIN priority index", yaxis_title="KSI (K+A) crash count")
+    return _polish_figure(fig), work[[c for c in [metric, "KSI (K+A) crashes", "Crash count", route_col, id_col] if c and c in work.columns]].copy()
+
+
+def _hin_table_for_display(hin, metric, top_n=20):
+    """Decision table for top sliding windows with module crash counts and dashboard KSI."""
+    work = _prepare_window_dashboard_table(hin)
+    if work is None or getattr(work, "empty", True):
+        return pd.DataFrame()
+    metric = "HIN_Priority_Index" if "HIN_Priority_Index" in work.columns else metric
+    if not metric or metric not in work.columns:
+        return pd.DataFrame()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+    work = work.sort_values(metric, ascending=False).head(top_n).reset_index(drop=True)
+
+    id_col = _normal_col(work, ["SegID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
+    route_col = _section7_route_col_from_tables(work, None)
+    length_col = _dashboard_length_col(work)
+    from_col = _normal_col(work, ["Win_From_Mi", "FromMile", "From_Mile", "from_mile", "BeginMile", "StartMile", "WindowFromMile"])
+    to_col = _normal_col(work, ["Win_To_Mi", "ToMile", "To_Mile", "to_mile", "EndMile", "WindowToMile"])
+
+    out = pd.DataFrame()
+    out["Rank"] = range(1, len(work) + 1)
+    out["SegID"] = work[id_col].astype(str).values if id_col else [f"HIN_{i + 1}" for i in range(len(work))]
+    out["Seg/window length"] = pd.to_numeric(work[length_col], errors="coerce").round(3).values if length_col else ""
+    out["From mile"] = pd.to_numeric(work[from_col], errors="coerce").round(3).values if from_col else ""
+    out["To mile"] = pd.to_numeric(work[to_col], errors="coerce").round(3).values if to_col else ""
+    out["Route"] = work[route_col].astype(str).values if route_col else ""
+    out["Crash count"] = pd.to_numeric(work["Dashboard_Crash_Count"], errors="coerce").fillna(0).round(0).astype(int).values
+    out["KSI (K+A) crashes"] = pd.to_numeric(work["KSI_Crashes_Dashboard"], errors="coerce").fillna(0).round(0).astype(int).values
+    out["HIN index"] = pd.to_numeric(work[metric], errors="coerce").round(3).values
+    out["Crashes/mile/year"] = pd.to_numeric(work.get("Crash_per_Mile_per_Year", 0), errors="coerce").fillna(0).round(3).values
+    out["KSI (K+A)/mile/year"] = pd.to_numeric(work.get("KSI_per_Mile_per_Year", 0), errors="coerce").fillna(0).round(3).values
+    out["Crash years used"] = pd.to_numeric(work.get("Dashboard_Analysis_Years", 1), errors="coerce").fillna(1).round(1).values
+    return out
+
+
+# --- V43 dashboard-only fix: safe sliding-window HIN summary ---
+# This override fixes the dashboard crash where the summary used a metric name
+# from one table but then summarized another table.  It also keeps selected-HIN
+# crash/KSI capture tied to the sliding-window assigned-crash table.
+
+
+def _section7_assigned_crashes_for_dashboard(crashes=None):
+    results = _section7_results_for_dashboard()
+    assigned = results.get("assigned_crashes")
+    if assigned is not None and not getattr(assigned, "empty", True):
+        return assigned
+    if crashes is not None and not getattr(crashes, "empty", True):
+        return crashes
+    return _dashboard_crashes_source_gdf(crashes)
+
+
+def _render_hin_network_summary(st, hin, crashes):
+    """High Injury Network summary using prepared sliding-window rows.
+
+    The important detail is that the metric and selected rows must come from
+    the same prepared table.  This avoids KeyError: HIN_Priority_Index when the
+    incoming HIN table uses a different column name than risk_windows.
+    """
+    work = _prepare_window_dashboard_table(hin, crashes=crashes)
+    if work is None or getattr(work, "empty", True):
+        return
+
+    metric = "HIN_Priority_Index" if "HIN_Priority_Index" in work.columns else _dashboard_hin_metric(work)
+    if not metric or metric not in work.columns:
+        st.info("HIN summary needs a HIN priority index or window score field.")
+        return
+
+    st.markdown(
+        "<div class='dashboard-section-title'>High Injury Network summary "
+        "<span>custom HIN threshold, miles, crashes, and KSI (K+A) capture</span></div>",
+        unsafe_allow_html=True,
+    )
+
+    work = work.copy()
+    work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+
+    length_col = _dashboard_length_col(work)
+    if length_col:
+        work[length_col] = pd.to_numeric(work[length_col], errors="coerce").fillna(0)
+    else:
+        length_col = "__unit_length__"
+        work[length_col] = 1.0
+
+    mode_col, control_col, c_miles, c_crashes, c_ksi = st.columns([1.35, 1.05, 1, 1, 1])
+
+    method = mode_col.selectbox(
+        "High-risk network threshold",
+        [
+            "Top percent of miles",
+            "Top number of segments/windows",
+            "HIN index threshold",
+            "Above average HIN index",
+            "Above median HIN index",
+        ],
+        index=0,
+        key="hin_summary_threshold_mode_v43",
+    )
+
+    top_percent = 10.0
+    top_n = 20
+    index_threshold = 50.0
+
+    with control_col:
+        if method == "Top percent of miles":
+            top_percent = st.number_input(
+                "Top percent",
+                min_value=1.0,
+                max_value=100.0,
+                value=float(st.session_state.get("hin_summary_top_percent", 10.0)),
+                step=1.0,
+                key="hin_summary_top_percent_v43",
+            )
+        elif method == "Top number of segments/windows":
+            top_n = st.number_input(
+                "Top N",
+                min_value=1,
+                max_value=max(int(len(work)), 1),
+                value=min(20, max(int(len(work)), 1)),
+                step=1,
+                key="hin_summary_top_n_v43",
+            )
+        elif method == "HIN index threshold":
+            index_threshold = st.number_input(
+                "Minimum HIN index",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(st.session_state.get("hin_summary_index_threshold", 50.0)),
+                step=5.0,
+                key="hin_summary_index_threshold_v43",
+            )
+        elif method == "Above average HIN index":
+            st.metric("Average", f"{work[metric].mean():,.2f}")
+        elif method == "Above median HIN index":
+            st.metric("Median", f"{work[metric].median():,.2f}")
+
+    selected = _selected_hin_subset(
+        work,
+        metric,
+        method,
+        top_percent=top_percent,
+        top_n=top_n,
+        index_threshold=index_threshold,
+    )
+
+    total_mi = float(pd.to_numeric(work[length_col], errors="coerce").fillna(0).sum())
+    high_mi = float(pd.to_numeric(selected[length_col], errors="coerce").fillna(0).sum()) if not selected.empty else 0.0
+    pct_mi = high_mi / total_mi * 100 if total_mi else 0.0
+
+    assigned = _section7_assigned_crashes_for_dashboard(crashes)
+    crash_subset, capture_note = _selected_hin_crash_subset(selected, assigned)
+
+    total_crashes = _safe_unique_crash_count(assigned)
+    high_crashes = _safe_unique_crash_count(crash_subset)
+    pct_crash = high_crashes / total_crashes * 100 if total_crashes else 0.0
+
+    total_ksi = _total_ka_from_crashes(assigned)
+    high_ksi = _total_ka_from_crashes(crash_subset)
+    pct_ksi = high_ksi / total_ksi * 100 if total_ksi else 0.0
+
+    c_miles.metric("High-risk miles", f"{high_mi:,.2f} mi", f"{pct_mi:,.1f}% of analyzed miles")
+    c_crashes.metric("Crashes on selected HIN", f"{high_crashes:,}", f"{pct_crash:,.1f}% of assigned sliding-window crashes")
+    c_ksi.metric("KSI (K+A) on selected HIN", f"{high_ksi:,}", f"{pct_ksi:,.1f}% of KSI (K+A)")
+
+    with st.expander("Selected HIN summary rows", expanded=False):
+        selected_display = _add_dashboard_rate_columns(selected, crashes=assigned)
+        preview_cols = []
+        for c in [
+            _normal_col(selected_display, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "CorridorID"]),
+            _normal_col(selected_display, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"]),
+            _dashboard_length_col(selected_display),
+            _normal_col(selected_display, ["Win_Start_M", "FromMile", "From_Mile", "WindowFromMile", "Win_From_Mi"]),
+            _normal_col(selected_display, ["Win_End_M", "ToMile", "To_Mile", "WindowToMile", "Win_To_Mi"]),
+            "Dashboard_Crash_Count",
+            "KSI_Crashes_Dashboard",
+            metric,
+            "Crash_per_Mile_per_Year",
+            "KSI_per_Mile_per_Year",
+            "Dashboard_Analysis_Years",
+        ]:
+            if c and c in selected_display.columns and c not in preview_cols:
+                preview_cols.append(c)
+        if preview_cols:
+            st.dataframe(_safe_dataframe_for_display(selected_display[preview_cols].head(50)), width="stretch", hide_index=True)
+        else:
+            st.info("No displayable HIN rows are available for the selected threshold.")
+
+    years = _dashboard_year_count(assigned)
+    st.caption(
+        f"Crashes/mile/year uses the detected crash data year span: {years:g} year(s). "
+        f"{capture_note} Dashboard controls summarize existing HIN results only; they do not recalculate HIN scores."
+    )
+
+    _render_hin_dashboard_charts(st, work)
