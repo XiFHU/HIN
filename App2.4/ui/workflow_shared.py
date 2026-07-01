@@ -68,28 +68,22 @@ def render_workflow(spatial_unit, st_folium, workflow_context):
         or bool(st.session_state.get("road_class_layer_enabled", False))
         or bool(st.session_state.get("keep_data_setup_open", False))
     )
-    with st.expander("1. Data setup", expanded=data_expanded):
+    with st.expander("Data setup", expanded=data_expanded):
         render_roads_step(st_folium, workflow_context, spatial_unit=spatial_unit)
         render_crashes_step(st_folium, workflow_context, spatial_unit=spatial_unit)
 
-    build_expanded = status["roads"] and not status["results"]
-    with st.expander("2. Build spatial units", expanded=build_expanded):
-        if spatial_unit == "Intersection":
-            render_signals_step(st_folium, workflow_context, spatial_unit=spatial_unit)
+    if spatial_unit in ["Intersection", "Corridor"]:
+        build_expanded = status["roads"] and not status["results"]
+        with st.expander("Build spatial units", expanded=build_expanded):
+            if spatial_unit == "Intersection":
+                render_signals_step(st_folium, workflow_context, spatial_unit=spatial_unit)
 
-        elif spatial_unit == "Corridor":
-            render_signals_step(st_folium, workflow_context, spatial_unit=spatial_unit)
-            render_corridors_step(st_folium, workflow_context, spatial_unit=spatial_unit)
-
-        elif spatial_unit == "Segment":
-            st.caption("Segments use the selected road network and auto-generated FromMile / ToMile values.")
-            with st.expander("Build corridor context for segment maps", expanded=False):
-                st.caption("Signals are required before corridors can be built. Thresholds are optional.")
+            elif spatial_unit == "Corridor":
                 render_signals_step(st_folium, workflow_context, spatial_unit=spatial_unit)
                 render_corridors_step(st_folium, workflow_context, spatial_unit=spatial_unit)
 
     analysis_expanded = status["roads"] and status["crashes"] and not status["results"]
-    with st.expander("3. Analysis", expanded=analysis_expanded):
+    with st.expander("Analysis", expanded=analysis_expanded):
         if spatial_unit == "Segment":
             st.caption(
                 "First create the segment crash-density layer, then run Sliding Window HIN. "
@@ -102,8 +96,8 @@ def render_workflow(spatial_unit, st_folium, workflow_context):
         else:
             render_results_step(st_folium, workflow_context, spatial_unit=spatial_unit)
 
-    with st.expander("4. Visualization", expanded=status["results"]):
+    with st.expander("Visualization", expanded=status["results"]):
         render_visualization_step(st_folium, workflow_context, spatial_unit=spatial_unit)
 
-    with st.expander("5. Results tables and downloads", expanded=status["results"]):
+    with st.expander("Results tables and downloads", expanded=status["results"]):
         render_final_outputs_step(workflow_context, spatial_unit=spatial_unit)

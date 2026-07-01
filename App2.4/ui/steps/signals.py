@@ -1,4 +1,4 @@
-"""Step 2 OSM signal generation UI."""
+"""OSM signal generation UI."""
 
 from modules.defaults import SIGNAL_DEFAULTS
 
@@ -54,6 +54,12 @@ def render_signals_step(st_folium, workflow_context, spatial_unit=None):
                     f"road snap distance {road_snap_distance} ft."
                 )
 
+        if signals_clean is not None and not signals_clean.empty:
+            st.success(
+                f"Existing cleaned signals are available: {len(signals_clean):,}. "
+                "Use the button below only if you want to refresh them."
+            )
+
         signal_source = st.radio(
             "Choose signal source",
             [
@@ -71,94 +77,121 @@ def render_signals_step(st_folium, workflow_context, spatial_unit=None):
                     "Downloading OSM traffic signals and removing duplicates..."
                 ):
 
-                    signals = download_signals(
-                        selected_boundary
-                    )
+                    try:
+                        signals = download_signals(
+                            selected_boundary
+                        )
 
-                    signals_clean = remove_duplicate_signals(
-                        signals,
-                        distance_m=signal_distance
-                    )
+                        signals_clean = remove_duplicate_signals(
+                            signals,
+                            distance_m=signal_distance
+                        )
 
-                    signals_clean = filter_signals_to_roads(
-                        signals_clean,
-                        selected_roads,
-                        max_distance_ft=road_snap_distance
-                    )
+                        signals_clean = filter_signals_to_roads(
+                            signals_clean,
+                            selected_roads,
+                            max_distance_ft=road_snap_distance
+                        )
 
-                    signals_clean = signals_clean.reset_index(
-                        drop=True
-                    )
+                        signals_clean = signals_clean.reset_index(
+                            drop=True
+                        )
 
-                    signals_clean["SignalID"] = (
-                        signals_clean.index + 1
-                    )
+                        signals_clean["SignalID"] = (
+                            signals_clean.index + 1
+                        )
 
-                    signals_clean["City"] = city_name
+                        signals_clean["City"] = city_name
 
-                    st.session_state[
-                        "signals_clean"
-                    ] = signals_clean
-                    st.session_state["signal_source_label"] = "OSM traffic signals"
+                        st.session_state[
+                            "signals_clean"
+                        ] = signals_clean
+                        st.session_state["signal_source_label"] = "OSM traffic signals"
 
-                    st.session_state.pop(
-                        "signals_with_corridor",
-                        None
-                    )
+                        st.session_state.pop(
+                            "signals_with_corridor",
+                            None
+                        )
 
-                    st.session_state.pop(
-                        "signals_for_corridors",
-                        None
-                    )
+                        st.session_state.pop(
+                            "signals_for_corridors",
+                            None
+                        )
 
-                    st.session_state.pop(
-                        "corridors",
-                        None
-                    )
+                        st.session_state.pop(
+                            "corridors",
+                            None
+                        )
 
-                    st.session_state.pop(
-                        "final_corridors",
-                        None
-                    )
+                        st.session_state.pop(
+                            "final_corridors",
+                            None
+                        )
 
-                    st.session_state.pop(
-                        "dropped_corridor_ids",
-                        None
-                    )
+                        st.session_state.pop(
+                            "dropped_corridor_ids",
+                            None
+                        )
 
-                    st.session_state.pop(
-                        "applied_dropped_corridor_ids",
-                        None
-                    )
+                        st.session_state.pop(
+                            "applied_dropped_corridor_ids",
+                            None
+                        )
 
-                    st.session_state.pop(
-                        "corridor_signal_summary",
-                        None
-                    )
+                        st.session_state.pop(
+                            "corridor_signal_summary",
+                            None
+                        )
 
-                    st.session_state.pop(
-                        "spatial_units",
-                        None
-                    )
+                        st.session_state.pop(
+                            "spatial_units",
+                            None
+                        )
 
-                    st.session_state.pop(
-                        "assigned_crashes",
-                        None
-                    )
+                        st.session_state.pop(
+                            "assigned_crashes",
+                            None
+                        )
 
-                    st.session_state.pop(
-                        "kabco_result",
-                        None
-                    )
+                        st.session_state.pop(
+                            "kabco_result",
+                            None
+                        )
 
-                    st.session_state.pop(
-                        "section7_results",
-                        None
-                    )
+                        st.session_state.pop(
+                            "section7_results",
+                            None
+                        )
 
-                    st.session_state[
-                        "active_map_layer"
-                    ] = "Signals"
+                        st.session_state[
+                            "active_map_layer"
+                        ] = "Signals"
+
+                        if signals_clean.empty:
+                            st.warning(
+                                "No OSM traffic signal points were found inside "
+                                "the selected study area after duplicate removal "
+                                "and road-distance filtering."
+                            )
+                        else:
+                            st.success(
+                                f"Generated {len(signals_clean):,} cleaned OSM traffic signals."
+                            )
+
+                    except Exception as e:
+                        st.error(
+                            "Unable to download OSM traffic signals from public "
+                            "Overpass servers. This is usually a temporary "
+                            "server/rate-limit issue, not a FARS crash-data issue."
+                        )
+                        st.info(
+                            "You can retry later, switch to 'Upload signal point file', "
+                            "or continue the segment/sliding-window workflow if signals "
+                            "are not required for your current analysis."
+                        )
+                        st.caption(
+                            str(e)
+                        )
         else:
             st.caption(
                 "Upload signal points as CSV/XLSX/GeoJSON/GPKG/Shapefile ZIP. "
