@@ -11,14 +11,6 @@ from sklearn.cluster import DBSCAN
 PROJECTED_CRS = "EPSG:26913"
 
 
-DEFAULT_OVERPASS_URLS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.openstreetmap.ru/api/interpreter",
-    "https://overpass.osm.ch/api/interpreter",
-]
-
-
 def normalize_road_name(name):
     if name is None:
         return ""
@@ -56,14 +48,17 @@ def normalize_road_name(name):
     return name
 
 
-def download_signals(boundary_gdf, overpass_urls=None):
-    """Download OSM traffic signals inside selected boundary.
+def download_signals(boundary_gdf):
+    """
+    Download OSM traffic signals inside selected boundary.
 
-    OSM signal downloading uses the public Overpass API through OSMnx.
-    Public Overpass servers can be temporarily busy or refuse connections,
-    especially from Streamlit Cloud shared IP addresses.  This function tries
-    multiple public endpoints and raises a readable error instead of letting a
-    raw connection traceback crash the app.
+    This keeps the original fast behavior:
+    - one Overpass request
+    - one Overpass server
+    - short timeout
+
+    If public Overpass fails, raise a clean readable error instead of
+    allowing the full Streamlit app to crash.
     """
 
     if boundary_gdf is None or boundary_gdf.empty:
@@ -72,95 +67,76 @@ def download_signals(boundary_gdf, overpass_urls=None):
             crs="EPSG:4326"
         )
 
+    boundary = boundary_gdf.copy()
+
+    if boundary.crs is None:
+        boundary = boundary.set_crs("EPSG:4326")
+
+    boundary = boundary.to_crs("EPSG:4326")
+
     try:
-        polygon = boundary_gdf.geometry.union_all()
+        polygon = boundary.geometry.union_all()
     except Exception:
-        polygon = boundary_gdf.geometry.unary_union
+        polygon = boundary.geometry.unary_union
 
     tags = {
         "highway": "traffic_signals"
     }
 
-    urls = list(overpass_urls or DEFAULT_OVERPASS_URLS)
-
-    previous_overpass_url = getattr(
-        ox.settings,
-        "overpass_url",
-        None
-    )
-
-    previous_timeout = getattr(
-        ox.settings,
-        "requests_timeout",
-        None
-    )
-
     try:
-        ox.settings.requests_timeout = 45
-    except Exception:
-        pass
+        # Use the base Overpass API URL.
+        # Do not add /interpreter here because OSMnx builds the request path.
+        ox.settings.overpass_url = "https://overpass-api.de/api"
+        ox.settings.requests_timeout = 30
 
-    errors = []
+        signals = ox.features_from_polygon(
+            polygon,
+            tags
+        )
 
-    for url in urls:
-        try:
-            ox.settings.overpass_url = url
+    except Exception as exc:
+        raise RuntimeError(
+            "Unable to download OSM traffic signals because the public "
+            "Overpass API did not respond. This is usually temporary. "
+            "Try again later, upload a signal point file, or continue with "
+            "Segment analysis if signals are not required."
+        ) from exc
 
-            signals = ox.features_from_polygon(
-                polygon,
-                tags
-            )
+    if signals is None or signals.empty:
+        return gpd.GeoDataFrame(
+            geometry=[],
+            crs="EPSG:4326"
+        )
 
-            if signals is None or signals.empty:
-                return gpd.GeoDataFrame(
-                    geometry=[],
-                    crs="EPSG:4326"
-                )
+    signals = signals[
+        signals.geometry.notna()
+    ].copy()
 
-            signals = signals[
-                signals.geometry.type == "Point"
-            ].copy()
+    signals = signals[
+        ~signals.geometry.is_empty
+    ].copy()
 
-            signals = signals.reset_index(drop=True)
+    signals = signals[
+        signals.geometry.type == "Point"
+    ].copy()
 
-            if signals.empty:
-                return gpd.GeoDataFrame(
-                    geometry=[],
-                    crs="EPSG:4326"
-                )
+    signals = signals.reset_index(
+        drop=True
+    )
 
-            if signals.crs is None:
-                signals = signals.set_crs("EPSG:4326")
+    if signals.empty:
+        return gpd.GeoDataFrame(
+            geometry=[],
+            crs="EPSG:4326"
+        )
 
-            return signals.to_crs("EPSG:4326")
+    if signals.crs is None:
+        signals = signals.set_crs(
+            "EPSG:4326"
+        )
 
-        except Exception as exc:
-            errors.append(
-                f"{url}: {exc}"
-            )
-
-    if previous_overpass_url:
-        try:
-            ox.settings.overpass_url = previous_overpass_url
-        except Exception:
-            pass
-
-    if previous_timeout is not None:
-        try:
-            ox.settings.requests_timeout = previous_timeout
-        except Exception:
-            pass
-
-    detail = " | ".join(errors[-2:])
-
-    raise RuntimeError(
-        "Unable to download OSM traffic signals because the public "
-        "Overpass API servers did not respond. This is usually temporary "
-        "and is not caused by the crash data. Try again later, use the "
-        "uploaded signal file option, or continue without downloading "
-        "signals if your current workflow does not require signalized "
-        "intersections/corridors. Details: "
-        + detail
+    return signals.to_crs(
+        "EPSG:4326"
     )
 
 
