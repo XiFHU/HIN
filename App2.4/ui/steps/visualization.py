@@ -241,6 +241,146 @@ def _render_summary_visualization(st_folium, workflow_context):
         render_map=True,
     )
 
+
+def _render_hin_summary_visualization(st_folium, workflow_context):
+    """Display-only HIN threshold/summary map.
+
+    This mirrors the crash-density threshold/summary map, but uses existing
+    sliding-window HIN results. It does not rerun or overwrite HIN analysis.
+    """
+    globals().update(workflow_context)
+    sliding_window_ui.__dict__.update(workflow_context)
+
+    results = st.session_state.get("section7_results", None)
+    if results is None:
+        st.info("Run Sliding Window Risk Analysis first. Then the HIN threshold/summary map will appear here.")
+        return
+
+    risk_segments = results.get("risk_segments")
+    if risk_segments is None or getattr(risk_segments, "empty", True):
+        st.info("No HIN segment/window results are available yet.")
+        return
+
+    final_corridors = st.session_state.get("final_corridors", st.session_state.get("corridors", None))
+    selected_roads = st.session_state.get("selected_roads", None)
+    route_col_s7 = st.session_state.get("section7_route_col_s7", st.session_state.get("route_col", "FULLNAME"))
+    risk_corridors = results.get("risk_corridors")
+
+    risk_segments = sliding_window_ui._ensure_hin_priority_columns(risk_segments)
+    risk_segments_clean = section7_clean_risk_segments(risk_segments, route_col_s7)
+    risk_corridors_clean = section7_clean_risk_corridors(risk_corridors, route_col_s7) if risk_corridors is not None else None
+
+    numeric_cols = [
+        c for c in [
+            "HIN_Priority_Index", "RiskScore", "CrashCount", "Crash_Count", "EPDO", "KSI_Count"
+        ]
+        if c in risk_segments_clean.columns
+    ]
+    if not numeric_cols:
+        numeric_cols = [c for c in risk_segments_clean.columns if c != "geometry" and pd.api.types.is_numeric_dtype(risk_segments_clean[c])]
+    if not numeric_cols:
+        st.warning("No numeric HIN fields are available for threshold/summary mapping.")
+        return
+
+    c1, c2 = st.columns([0.35, 0.65])
+    with c1:
+        metric = st.selectbox(
+            "HIN summary metric",
+            numeric_cols,
+            index=0 if "HIN_Priority_Index" not in numeric_cols else numeric_cols.index("HIN_Priority_Index"),
+            key="hin_summary_map_metric",
+        )
+        summary_type = st.selectbox(
+            "HIN summary statistic",
+            ["Value map", "Above average", "Above median", "Custom threshold"],
+            key="hin_summary_map_type",
+        )
+        custom_threshold = None
+        if summary_type == "Custom threshold":
+            values = pd.to_numeric(risk_segments_clean[metric], errors="coerce")
+            default_threshold = float(values.median()) if values.notna().any() else 0.0
+            custom_threshold = st.number_input(
+                "Minimum HIN value",
+                value=default_threshold,
+                step=5.0,
+                key="hin_summary_custom_threshold",
+            )
+
+    display_segments = risk_segments_clean.copy()
+    metric_values = pd.to_numeric(display_segments[metric], errors="coerce")
+    if summary_type == "Above average":
+        threshold = metric_values.mean()
+        display_segments = display_segments[metric_values >= threshold].copy()
+        st.caption(f"Showing HIN segments/windows with {metric} >= average ({threshold:.2f}).")
+    elif summary_type == "Above median":
+        threshold = metric_values.median()
+        display_segments = display_segments[metric_values >= threshold].copy()
+        st.caption(f"Showing HIN segments/windows with {metric} >= median ({threshold:.2f}).")
+    elif summary_type == "Custom threshold":
+        threshold = float(custom_threshold if custom_threshold is not None else 0.0)
+        display_segments = display_segments[metric_values >= threshold].copy()
+        st.caption(f"Showing HIN segments/windows with {metric} >= {threshold:.2f}.")
+    else:
+        st.caption(f"Showing {metric} value map for all HIN segments/windows.")
+
+    if display_segments.empty:
+        st.warning("No HIN segments/windows match the selected summary threshold.")
+        return
+
+    risk_corridors_map = risk_corridors_clean
+    if (
+        display_segments is not None
+        and not display_segments.empty
+        and risk_corridors_clean is not None
+        and not risk_corridors_clean.empty
+        and "CorridorID" in display_segments.columns
+        and "CorridorID" in risk_corridors_clean.columns
+    ):
+        selected_corridor_ids = set(display_segments["CorridorID"].astype(str))
+        risk_corridors_map = risk_corridors_clean[
+            risk_corridors_clean["CorridorID"].astype(str).isin(selected_corridor_ids)
+        ].copy()
+
+    with st.expander("HIN summary map color / legend settings", expanded=False):
+        risk_score_symbology = render_numeric_symbology_controls(
+            "HIN summary map",
+            key_prefix="viz_hin_summary_map",
+            default_method="Quantile",
+        )
+
+    selected_layers = ["HIN Priority Index"]
+    fmap = sliding_window_ui._make_segment_comparison_map(
+        original_density=st.session_state.get("section7_original_density", None),
+        risk_segments=display_segments,
+        risk_corridors=risk_corridors_map,
+        crashes=st.session_state.get("section7_crashes_for_map", st.session_state.get("crashes", None)),
+        roads=selected_roads,
+        roads_class=st.session_state.get("roads_class_display", None),
+        signals=st.session_state.get("signals_clean", None),
+        corridors=final_corridors,
+        spatial_units=st.session_state.get("spatial_units_density_map", st.session_state.get("spatial_units", None)),
+        selected_layers=selected_layers,
+        crash_density_symbology={"method": "Capped gradient"},
+        original_density_symbology={"method": "Capped gradient"},
+        risk_score_symbology=risk_score_symbology,
+        crash_color_settings={"enabled": False, "field": None},
+    )
+
+    st_folium(
+        fmap,
+        height=760,
+        width="100%",
+        key=(
+            "viz_hin_summary_map_"
+            + str(summary_type)
+            + "_"
+            + str(metric)
+            + "_"
+            + str(len(display_segments))
+        ),
+    )
+
+
 def render_visualization_step(st_folium, workflow_context, spatial_unit=None):
     globals().update(workflow_context)
 
@@ -253,6 +393,7 @@ def render_visualization_step(st_folium, workflow_context, spatial_unit=None):
 
     if st.session_state.get("section7_results", None) is not None:
         available_maps.append("HIN Priority Index Map")
+        available_maps.append("HIN Threshold/Summary Map")
 
     if not available_maps:
         st.info("Run an analysis first. Visualization maps will appear here after results are available.")
@@ -262,12 +403,14 @@ def render_visualization_step(st_folium, workflow_context, spatial_unit=None):
         "Map to display",
         available_maps,
         key="visualization_selected_map",
-        help="Crash Density Map shows the actual crash density values for each spatial unit. Crash Density Threshold/Summary Map uses the same results but lets you highlight units above the average or median for quick screening."
+        help="Crash Density Map and HIN Priority Index Map show the main result values. The threshold/summary maps use the same existing results but let you highlight units above the average, median, or a custom threshold for quick screening."
     )
     if selected_map == "Crash Density Map":
         st.caption("Crash Density Map = the main result map showing each intersection/segment/corridor by its calculated crash density value.")
     elif selected_map == "Crash Density Threshold/Summary Map":
         st.caption("Crash Density Threshold/Summary Map = a screening view from the same data, such as only units above the average or median. It does not create new analysis results.")
+    elif selected_map == "HIN Threshold/Summary Map":
+        st.caption("HIN Threshold/Summary Map = a screening view from existing HIN results, such as HIN index above average, median, or a custom threshold. It does not recalculate HIN scores.")
 
     if selected_map == "Crash Density Map":
         _render_crash_density_visualization(st_folium, workflow_context)
@@ -275,3 +418,5 @@ def render_visualization_step(st_folium, workflow_context, spatial_unit=None):
         _render_summary_visualization(st_folium, workflow_context)
     elif selected_map == "HIN Priority Index Map":
         _render_sliding_window_visualization(st_folium, workflow_context)
+    elif selected_map == "HIN Threshold/Summary Map":
+        _render_hin_summary_visualization(st_folium, workflow_context)
