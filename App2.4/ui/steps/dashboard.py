@@ -8063,3 +8063,351 @@ def _render_hin_network_summary(st, hin, crashes):
     )
 
     _render_hin_dashboard_charts(st, work)
+
+# --- V10 report recommendation and KSI summary overrides -------------------
+# Report/dashboard display-export only. These helpers do not change workflow
+# spatial assignment, crash-density, corridor, or sliding-window calculations.
+
+def _ksi_summary_by_spatial_unit_table(tables, top_n=20):
+    """Report table focused on KSI (K+A) by spatial unit.
+
+    The old severity summary could include B/C/O.  For the Word report, this
+    table is intentionally limited to K, A, and KSI (K+A) because it is used as
+    an injury-severity priority summary.
+    """
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    if crashes is None or getattr(crashes, "empty", True):
+        return pd.DataFrame()
+
+    unit_col = _unit_col(crashes) or _normal_col(
+        crashes,
+        ["UnitID", "IntersectionID", "CorridorID", "SegmentID", "SegID"],
+    )
+    if not unit_col:
+        return pd.DataFrame()
+
+    work = _drop_geometry(crashes).copy()
+    sev_cols = _severity_count_columns(work)
+    use_person_counts = False
+    if sev_cols and not _is_fars_fatal_only_dataset(work):
+        for col in [sev_cols.get("K"), sev_cols.get("A")]:
+            if col and col in work.columns and pd.to_numeric(work[col], errors="coerce").fillna(0).sum() > 0:
+                use_person_counts = True
+                break
+
+    if use_person_counts:
+        rows = pd.DataFrame({unit_col: work[unit_col].astype(str)})
+        rows["K"] = pd.to_numeric(work[sev_cols.get("K")], errors="coerce").fillna(0) if sev_cols.get("K") else 0
+        rows["A"] = pd.to_numeric(work[sev_cols.get("A")], errors="coerce").fillna(0) if sev_cols.get("A") else 0
+        rows = rows.groupby(unit_col, dropna=False)[["K", "A"]].sum().reset_index()
+    else:
+        kabco = _kabco_col(work)
+        if not kabco or kabco not in work.columns:
+            return pd.DataFrame()
+        work["KABCO_Normalized"] = work[kabco].map(normalize_kabco_value).astype(str).str.upper()
+        work = work[work["KABCO_Normalized"].isin(["K", "A"])].copy()
+        if work.empty:
+            return pd.DataFrame()
+        rows = (
+            work.groupby([unit_col, "KABCO_Normalized"], dropna=False)
+            .size()
+            .reset_index(name="Count")
+            .pivot_table(index=unit_col, columns="KABCO_Normalized", values="Count", aggfunc="sum", fill_value=0)
+            .reset_index()
+        )
+        for col in ["K", "A"]:
+            if col not in rows.columns:
+                rows[col] = 0
+
+    rows["K"] = pd.to_numeric(rows["K"], errors="coerce").fillna(0).astype(int)
+    rows["A"] = pd.to_numeric(rows["A"], errors="coerce").fillna(0).astype(int)
+    rows["KSI (K+A)"] = rows["K"] + rows["A"]
+
+    density = tables.get("Crash density results")
+    if density is not None and not getattr(density, "empty", True):
+        d = _drop_geometry(density).copy()
+        d_unit = _unit_col(d) or _normal_col(d, ["UnitID", "IntersectionID", "CorridorID", "SegmentID", "SegID"])
+        keep = [c for c in [d_unit, "UnitType", "City", "CrashCount", "CrashDensity"] if c and c in d.columns]
+        if d_unit and keep:
+            rows = rows.merge(d[keep].drop_duplicates(subset=[d_unit]), left_on=unit_col, right_on=d_unit, how="left")
+            if d_unit != unit_col and d_unit in rows.columns:
+                rows = rows.drop(columns=[d_unit])
+
+    rows = rows.sort_values(["KSI (K+A)", "K", "A"], ascending=False).head(top_n).reset_index(drop=True)
+    rows.insert(0, "Rank", range(1, len(rows) + 1))
+
+    out_cols = ["Rank", unit_col]
+    for c in ["UnitType", "City", "CrashCount", "CrashDensity", "K", "A", "KSI (K+A)"]:
+        if c in rows.columns and c not in out_cols:
+            out_cols.append(c)
+    out = rows[out_cols].copy()
+    if unit_col != "UnitID":
+        out = out.rename(columns={unit_col: "UnitID"})
+    return out
+
+
+def _export_tables_only(tables, top_n=20):
+    """Report-ready tables with KSI-only severity summary."""
+    out = {}
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    density = tables.get("Crash density results")
+    hin = tables.get("HIN risk segments", tables.get("HIN corridors"))
+
+    if crashes is not None:
+        type_col = _crash_type_col(crashes)
+        if type_col:
+            out["Crash type summary"] = _aggregate(crashes, type_col, None, "Count", top_n)
+        years = _year_series_from_crashes(crashes)
+        if years is not None:
+            ydf = pd.DataFrame({"Year": years})
+            ydf = ydf[ydf["Year"].ne("Unknown")]
+            if not ydf.empty:
+                out["Crash year summary"] = ydf.groupby("Year", dropna=False).size().reset_index(name="Count").sort_values("Year")
+        ksi = _ksi_summary_by_spatial_unit_table(tables, top_n=top_n)
+        if not ksi.empty:
+            out["KSI summary by spatial unit"] = ksi
+
+    if density is not None:
+        top_density = _top_density_export_table(density, top_n=top_n)
+        if not top_density.empty:
+            out["Top crash-density spatial units"] = top_density
+
+    if hin is not None:
+        metric = _dashboard_hin_metric(hin)
+        top_hin = _hin_table_for_display(hin, metric, top_n) if metric else pd.DataFrame()
+        if not top_hin.empty:
+            out["Top HIN/risk spatial units"] = top_hin
+
+    return {name: _safe_dataframe_for_display(df) for name, df in out.items()}
+
+
+def _report_tables(tables, top_n=20):
+    """Report-ready tables for dashboard preview/export."""
+    return _export_tables_only(tables, top_n=top_n)
+
+
+def _clean_route_name_for_report(value):
+    text = str(value or "").strip()
+    if not text or text.lower() in ["nan", "none", "unknown"]:
+        return ""
+    return text
+
+
+def _join_report_names(names, max_items=5):
+    vals = []
+    seen = set()
+    for n in names:
+        t = _clean_route_name_for_report(n)
+        if t and t.lower() not in seen:
+            vals.append(t)
+            seen.add(t.lower())
+        if len(vals) >= max_items:
+            break
+    if not vals:
+        return ""
+    if len(vals) == 1:
+        return vals[0]
+    if len(vals) == 2:
+        return f"{vals[0]} and {vals[1]}"
+    return ", ".join(vals[:-1]) + f", and {vals[-1]}"
+
+
+def _top_hin_routes_for_recommendations(tables, top_n=5):
+    hin = tables.get("HIN risk segments", tables.get("HIN corridors"))
+    if hin is None or getattr(hin, "empty", True):
+        return pd.DataFrame()
+    df = _drop_geometry(hin).copy()
+    metric = _dashboard_hin_metric(df)
+    route_col = _normal_col(df, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"])
+    length_col = _dashboard_length_col(df)
+    if not metric or not route_col:
+        return pd.DataFrame()
+    df[metric] = pd.to_numeric(df[metric], errors="coerce").fillna(0)
+    df[route_col] = df[route_col].map(_clean_route_name_for_report)
+    df = df[df[route_col].ne("")].copy()
+    if df.empty:
+        return pd.DataFrame()
+    agg_dict = {
+        "Max_HIN": (metric, "max"),
+        "Avg_HIN": (metric, "mean"),
+        "Segment_Window_Count": (metric, "size"),
+    }
+    if length_col and length_col in df.columns:
+        df[length_col] = pd.to_numeric(df[length_col], errors="coerce").fillna(0)
+        agg_dict["Miles"] = (length_col, "sum")
+    out = df.groupby(route_col, dropna=False).agg(**agg_dict).reset_index().rename(columns={route_col: "Route"})
+    out = out.sort_values(["Max_HIN", "Avg_HIN", "Segment_Window_Count"], ascending=False).head(top_n).reset_index(drop=True)
+    return out
+
+
+def _top_density_locations_for_recommendations(tables, top_n=6):
+    density = tables.get("Crash density results")
+    if density is None or getattr(density, "empty", True):
+        return pd.DataFrame()
+    df = _drop_geometry(density).copy()
+    density_col = _normal_col(df, ["CrashDensity", "Crash_Density", "crash_density"])
+    if not density_col:
+        return pd.DataFrame()
+    df[density_col] = pd.to_numeric(df[density_col], errors="coerce").fillna(0)
+    route_col = _normal_col(df, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"])
+    unit_col = _unit_col(df) or _normal_col(df, ["UnitID", "IntersectionID", "CorridorID", "SegmentID", "SegID"])
+    label_col = route_col or unit_col
+    if not label_col:
+        return pd.DataFrame()
+    df[label_col] = df[label_col].map(_clean_route_name_for_report)
+    df = df[df[label_col].ne("")].copy()
+    if df.empty:
+        return pd.DataFrame()
+    out = df.sort_values(density_col, ascending=False).head(top_n).copy()
+    out = out.rename(columns={label_col: "Location", density_col: "CrashDensity"})
+    return out[[c for c in ["Location", "CrashDensity", unit_col] if c and c in out.columns]].reset_index(drop=True)
+
+
+def _top_crash_patterns_for_recommendations(crashes, top_n=3):
+    if crashes is None or getattr(crashes, "empty", True):
+        return []
+    type_col = _crash_type_col(crashes)
+    if not type_col or type_col not in crashes.columns:
+        return []
+    s = crashes[type_col].dropna().astype(str).str.strip()
+    s = s[~s.str.lower().isin(["", "nan", "none", "unknown"])]
+    if s.empty:
+        return []
+    return list(s.value_counts().head(top_n).index)
+
+
+def _add_recommendations_section(doc, tables):
+    """Add data-driven screening recommendations to the Word report."""
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    hin_routes = _top_hin_routes_for_recommendations(tables, top_n=5)
+    density_locs = _top_density_locations_for_recommendations(tables, top_n=6)
+    patterns = _top_crash_patterns_for_recommendations(crashes, top_n=3)
+
+    doc.add_heading("Key recommendations and suggested next steps", level=1)
+    doc.add_paragraph(
+        "The following recommendations are generated from the current screening results. "
+        "They are intended to identify where detailed safety diagnosis should begin; they do not replace field review, crash-diagram review, or engineering judgment."
+    )
+
+    route_names = _join_report_names(hin_routes["Route"].tolist() if not hin_routes.empty else [], max_items=5)
+    first_route = _clean_route_name_for_report(hin_routes["Route"].iloc[0]) if not hin_routes.empty else "the highest-ranked HIN corridor"
+    doc.add_heading("1. Prioritize HIN corridors for detailed safety review", level=2)
+    if route_names:
+        doc.add_paragraph(
+            f"Begin corridor-level safety diagnosis on {route_names}, because these routes appear in the highest HIN/risk rankings. "
+            f"Treat {first_route} as an initial priority because it has the highest HIN screening score in the current results."
+        )
+    else:
+        doc.add_paragraph(
+            "Use the highest-ranked HIN routes or windows from the result table as the starting point for detailed safety diagnosis."
+        )
+    doc.add_paragraph(
+        "For these corridors, review crash diagrams, signal spacing, turn-lane operations, access spacing, queueing, speed environment, lighting, and pedestrian/bicycle context before selecting countermeasures."
+    )
+
+    doc.add_heading("2. Separate corridor priorities from spot-treatment candidates", level=2)
+    density_names = _join_report_names(density_locs["Location"].tolist() if not density_locs.empty else [], max_items=6)
+    if density_names:
+        doc.add_paragraph(
+            f"Review high crash-density locations such as {density_names} as potential near-term spot-treatment candidates. "
+            "These locations should be considered separately from the corridor-level HIN priorities so the implementation plan can address both systemic risk and localized crash clusters."
+        )
+    else:
+        doc.add_paragraph(
+            "Use the crash-density ranking table to identify near-term spot-treatment candidates, and keep those locations separate from broader HIN corridor priorities."
+        )
+
+    doc.add_heading("3. Target dominant crash patterns after location-level validation", level=2)
+    pattern_text = _join_report_names(patterns, max_items=3)
+    if pattern_text:
+        doc.add_paragraph(
+            f"The leading crash patterns in the current dataset include {pattern_text}. "
+            "Use these patterns as a starting point for diagnosis, then confirm the pattern at each priority corridor or segment before selecting treatments."
+        )
+    else:
+        doc.add_paragraph(
+            "Review crash type, severity, and location patterns at each priority corridor or segment before selecting treatments."
+        )
+
+    doc.add_heading("4. Validate data and assumptions before programming projects", level=2)
+    doc.add_paragraph(
+        "Confirm crash geocoding, crash-year coverage, severity/KSI mapping, roadway segmentation, selected road-class filters, and HIN threshold settings before using the results for funding or project programming. "
+        "Locations already improved or already programmed should be flagged during the follow-up review."
+    )
+
+    doc.add_heading("5. Convert the screening into an action matrix", level=2)
+    doc.add_paragraph(
+        "Prepare a short implementation matrix listing each priority corridor or spot location, the main safety issue, likely contributing factors, recommended follow-up review, potential countermeasure category, timeframe, and responsible lead."
+    )
+    matrix_rows = [
+        [first_route if first_route else "Highest-ranked HIN corridor", "HIN corridor", "High HIN screening score", "Corridor safety diagnosis", "Signal operations, access management, speed management, intersection review", "Near-term study", "Agency to assign"],
+        [density_locs["Location"].iloc[0] if not density_locs.empty else "Highest crash-density location", "Spot location", "Localized crash concentration", "Site-level crash review", "Quick-build or spot safety treatment", "Short term", "Agency to assign"],
+    ]
+    action_df = pd.DataFrame(matrix_rows, columns=["Priority location", "Priority type", "Main safety issue", "Follow-up review", "Potential countermeasure category", "Timeframe", "Lead"])
+    _add_dataframe_table(doc, action_df, max_rows=10)
+
+
+def _export_dashboard_docx(tables, selected_blocks, selected_maps, extra_figures=None, maps=None, overlay_layers=None, report_timezone=None):
+    """Word report export with data-driven recommendations and KSI-only table names."""
+    if Document is None:
+        return None
+    doc = Document()
+    title = _report_title(tables)
+    doc.add_heading(title, level=0)
+    doc.add_paragraph(f"Generated: {_report_time_text(report_timezone)}")
+    doc.add_paragraph(f"User email: {_report_user_email()}")
+
+    doc.add_heading("Introduction", level=1)
+    doc.add_paragraph(_report_introduction_text(tables))
+
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    _add_data_section(doc, tables, crashes)
+    _add_methodology_section(doc, tables)
+    _add_limitations_section(doc)
+
+    doc.add_heading("Results and visualization", level=1)
+    kpis = _summary_kpi_values(crashes)
+    doc.add_heading("Crash summary", level=2)
+    _add_key_value_table(doc, [(k, _format_kpi_value(v)) for k, v in kpis.items()])
+
+    figures = _build_default_figures(tables) + (extra_figures or [])
+    _add_bubble_size_note_if_needed(doc, figures)
+    for fig_title, fig, data in figures:
+        if selected_blocks and fig_title not in selected_blocks:
+            continue
+        doc.add_heading(str(fig_title), level=2)
+        img = _figure_to_png_bytes(_polish_figure(fig))
+        if img:
+            doc.add_picture(io.BytesIO(img), width=Inches(6.5))
+        else:
+            doc.add_paragraph("Chart image could not be generated in this environment. The summary table is included below.")
+        table_df = _safe_dataframe_for_display(data.copy())
+        if not table_df.empty:
+            doc.add_paragraph("Summary table")
+            _add_dataframe_table(doc, table_df, max_rows=20)
+
+    if selected_maps:
+        doc.add_heading("Selected map layers", level=2)
+        for m in selected_maps:
+            doc.add_heading(str(m), level=3)
+            if maps and m in maps:
+                map_png = _static_map_png(maps[m], str(m), overlay_layers=overlay_layers)
+                if map_png:
+                    doc.add_picture(io.BytesIO(map_png), width=Inches(6.5))
+                else:
+                    doc.add_paragraph("Static map image could not be generated.")
+            else:
+                doc.add_paragraph("Map layer selected in dashboard builder.")
+
+    _add_recommendations_section(doc, tables)
+
+    doc.add_heading("Decision-ready result tables", level=2)
+    for table_name, df in _report_tables(tables).items():
+        doc.add_heading(str(table_name), level=3)
+        if not _add_dataframe_table(doc, df, max_rows=25):
+            doc.add_paragraph("No records available.")
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
