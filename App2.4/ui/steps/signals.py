@@ -15,7 +15,7 @@ def render_signals_step(st_folium, workflow_context, spatial_unit=None):
 
     if selected_boundary is not None:
 
-        signal_distance = SIGNAL_DEFAULTS["duplicate_signal_distance_m"]
+        duplicate_signal_distance_ft = SIGNAL_DEFAULTS["duplicate_signal_distance_ft"]
         road_snap_distance = SIGNAL_DEFAULTS["road_snap_distance_ft"]
 
         st.caption(
@@ -31,13 +31,17 @@ def render_signals_step(st_folium, workflow_context, spatial_unit=None):
             )
 
             if customize_signal_settings:
-                signal_distance = st.number_input(
-                    "Duplicate signal distance (meters)",
-                    min_value=10,
-                    max_value=100,
-                    value=SIGNAL_DEFAULTS["duplicate_signal_distance_m"],
+                duplicate_signal_distance_ft = st.number_input(
+                    "Duplicate signal distance (feet)",
+                    min_value=25,
+                    max_value=300,
+                    value=SIGNAL_DEFAULTS["duplicate_signal_distance_ft"],
                     step=5,
-                    key="signal_duplicate_distance_m"
+                    key="signal_duplicate_distance_ft",
+                    help=(
+                        "Signals closer than this distance are treated as duplicates. "
+                        "The app uses this feet value for duplicate clustering."
+                    )
                 )
 
                 road_snap_distance = st.number_input(
@@ -50,7 +54,7 @@ def render_signals_step(st_folium, workflow_context, spatial_unit=None):
                 )
             else:
                 st.caption(
-                    f"Using defaults: duplicate distance {signal_distance} m; "
+                    f"Using defaults: duplicate distance {duplicate_signal_distance_ft} ft; "
                     f"road snap distance {road_snap_distance} ft."
                 )
 
@@ -82,9 +86,13 @@ def render_signals_step(st_folium, workflow_context, spatial_unit=None):
                             selected_boundary
                         )
 
+                        duplicate_signal_distance_m = (
+                            float(duplicate_signal_distance_ft) * 0.3048
+                        )
+
                         signals_clean = remove_duplicate_signals(
                             signals,
-                            distance_m=signal_distance
+                            distance_m=duplicate_signal_distance_m
                         )
 
                         signals_clean = filter_signals_to_roads(

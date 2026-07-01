@@ -5,15 +5,19 @@ inside an Optional settings expander.
 """
 
 SIGNAL_DEFAULTS = {
-    "duplicate_signal_distance_m": 45,
+    # User-facing thresholds are in feet. The UI converts feet to meters
+    # only when calling geometry functions that operate in a projected CRS.
+    "duplicate_signal_distance_ft": 145,
     "road_snap_distance_ft": 300,
 }
 
 CORRIDOR_DEFAULTS = {
     "min_signals_for_corridor": 3,
-    "nearest_road_distance_m": 100,
-    "corridor_width_m": 20,
-    "corridor_search_buffer_m": 200,
+    # User-facing thresholds are in feet. The corridor UI converts these
+    # to meters before calling the corridor-building functions.
+    "nearest_road_distance_ft": 300,
+    "corridor_width_ft": 65,
+    "corridor_search_buffer_ft": 300,
 }
 
 CRASH_JOIN_DEFAULTS = {
