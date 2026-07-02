@@ -145,21 +145,40 @@ def _first_existing_column(df, candidates):
 
 
 def is_fars_fatal_only_dataset(df):
-    """Return True for the FARS Accident fatal-crash dataset.
+    """Return True only for confirmed FARS Accident fatal-crash data.
 
-    FARS Accident rows are fatal crashes only.  Injury-count columns in the
-    Accident table should not be interpreted as local K/A/B/C/O crash counts.
+    Local crash datasets can contain columns such as SourceCrashID or
+    Fatalities, so those fields alone must not force every crash to K.
     """
     if df is None or getattr(df, "empty", True):
         return False
+
     if "CrashSource" in df.columns:
         try:
             if df["CrashSource"].dropna().astype(str).str.upper().eq("FARS").any():
                 return True
         except Exception:
             pass
+
     cols = {str(c).lower() for c in df.columns}
-    return ("st_case" in cols or "sourcecrashid" in cols) and ("fatals" in cols or "fatalities" in cols)
+
+    # ST_CASE is specific to FARS/NHTSA. SourceCrashID is not enough because
+    # uploaded local datasets may also use that column name.
+    fars_specific_cols = {
+        "st_case",
+        "ve_total",
+        "veh_no",
+        "man_collname",
+        "harm_evname",
+        "func_sysname",
+        "route_name",
+        "rur_urbname",
+    }
+
+    return bool(cols.intersection(fars_specific_cols)) and (
+        "fatals" in cols
+        or "fatalities" in cols
+    )
 
 
 def _apply_fars_mapping_defaults(df, mapping):
