@@ -145,40 +145,61 @@ def _first_existing_column(df, candidates):
 
 
 def is_fars_fatal_only_dataset(df):
-    """Return True only for confirmed FARS Accident fatal-crash data.
+    """Return True only for true FARS fatal-crash datasets.
 
-    Local crash datasets can contain columns such as SourceCrashID or
-    Fatalities, so those fields alone must not force every crash to K.
+    Important distinction:
+    - FARS Accident data is fatal-crash-only.  Every record should be K.
+    - Local all-crash files can also contain fields such as ``Fatalities`` or
+      ``SourceCrashID``.  Those are count/id fields and must NOT force every
+      record to K.  Local data must use the mapped severity column.
+
+    Therefore, this detector uses either an explicit FARS source flag or the
+    true FARS Accident structure.  It never uses ``Fatalities`` alone.
     """
     if df is None or getattr(df, "empty", True):
         return False
 
+    # Explicit source flag set by the FARS workflow/parser.
+    try:
+        source_attr = str(getattr(df, "attrs", {}).get("CrashSource", "")).strip().upper()
+        if source_attr == "FARS":
+            return True
+    except Exception:
+        pass
+
     if "CrashSource" in df.columns:
         try:
-            if df["CrashSource"].dropna().astype(str).str.upper().eq("FARS").any():
+            source_values = (
+                df["CrashSource"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .str.upper()
+                .unique()
+            )
+            if len(source_values) > 0 and all(v == "FARS" for v in source_values):
                 return True
         except Exception:
             pass
 
-    cols = {str(c).lower() for c in df.columns}
+    cols = {str(c).strip().lower() for c in df.columns}
 
-    # ST_CASE is specific to FARS/NHTSA. SourceCrashID is not enough because
-    # uploaded local datasets may also use that column name.
-    fars_specific_cols = {
-        "st_case",
-        "ve_total",
-        "veh_no",
-        "man_collname",
-        "harm_evname",
-        "func_sysname",
-        "route_name",
-        "rur_urbname",
-    }
+    # Native NHTSA FARS Accident export structure before standardization.
+    # The user-provided example has: caseyear, state, st_case, fatals.
+    fars_required = {"caseyear", "state", "st_case", "fatals"}
+    if fars_required.issubset(cols):
+        return True
 
-    return bool(cols.intersection(fars_specific_cols)) and (
-        "fatals" in cols
-        or "fatalities" in cols
-    )
+    # Some FARS exports use uppercase/year variants.  Require ST_CASE + FATALS
+    # plus at least one true FARS year/state field.
+    has_st_case = "st_case" in cols
+    has_fatals = "fatals" in cols
+    has_year = bool({"caseyear", "year"} & cols)
+    has_state = bool({"state", "statename"} & cols)
+    if has_st_case and has_fatals and has_year and has_state:
+        return True
+
+    return False
 
 
 def _apply_fars_mapping_defaults(df, mapping):

@@ -59,6 +59,9 @@ def derive_kabco_from_count_columns(
         classify_row,
         axis=1
     )
+    df["DashboardKABCO"] = df["KABCO"]
+    df["DashboardSeverityLabel"] = df["KABCO"]
+    df["CrashSeverityLabel"] = df["DashboardSeverityLabel"]
 
     return df
 
@@ -81,133 +84,6 @@ def _clear_downstream_results_after_crash_change():
     ]:
         st.session_state.pop(k, None)
 
-
-
-def _clean_unique_text_values(series):
-    """Return sorted non-empty text values for user-facing filters."""
-    values = (
-        series
-        .dropna()
-        .astype(str)
-        .str.strip()
-    )
-
-    values = values[
-        (values != "")
-        & (values.str.lower() != "nan")
-        & (values.str.lower() != "none")
-        & (values.str.lower() != "null")
-    ]
-
-    return sorted(values.unique())
-
-
-def _get_original_severity_filter_column(crashes):
-    """Return the original severity-label column for filters and legends.
-
-    The user-facing filter should show labels from the uploaded/mapped
-    severity field, such as "Fatal (K)" or "No Injury (PDO)".
-    The normalized KABCO field is only for calculations.
-    """
-
-    if crashes is None or crashes.empty:
-        return None
-
-    # First, prefer explicit label columns created during field mapping.
-    # But only use them if they still contain more than one real label.
-    # If an old session incorrectly converted everything to K, fall back to
-    # the original mapped source column below.
-    preferred_label_cols = [
-        "DashboardSeverityLabel",
-        "CrashSeverityLabel",
-        "SeverityLabel",
-        "OriginalSeverity",
-        "Severity_Original",
-    ]
-
-    for col in preferred_label_cols:
-        if col in crashes.columns:
-            values = _clean_unique_text_values(crashes[col])
-            if len(values) > 1:
-                return col
-
-    # Next, use the mapped original severity source column saved in session.
-    mapped_cols = [
-        st.session_state.get("upload_crash_field_mapping_severity"),
-        st.session_state.get("fars_crash_field_mapping_severity"),
-        st.session_state.get("severity_col"),
-        st.session_state.get("mapped_severity_col"),
-        st.session_state.get("kabco_severity_col"),
-        st.session_state.get("crash_severity_col"),
-        st.session_state.get("field_mapping_severity_col"),
-    ]
-
-    for col in mapped_cols:
-        if col and col in crashes.columns and col != "KABCO":
-            values = _clean_unique_text_values(crashes[col])
-            if len(values) > 1:
-                return col
-
-    # Finally, try common source severity column names.
-    likely_cols = [
-        "Severity",
-        "SEVERITY",
-        "CrashSeverity",
-        "CRASH_SEVERITY",
-        "Crash_Severity",
-        "InjurySeverity",
-        "INJURY_SEVERITY",
-        "Most_Severe_Injury",
-        "MOST_SEVERE_INJURY",
-        "SeverityName",
-        "SEVERITYNAME",
-        "Severity_Name",
-    ]
-
-    for col in likely_cols:
-        if col in crashes.columns and col != "KABCO":
-            values = _clean_unique_text_values(crashes[col])
-            if len(values) > 1:
-                return col
-
-    # Last resort only. This may be K/A/B/C/O, so do not use it unless there
-    # is no original label column available.
-    if "KABCO" in crashes.columns:
-        return "KABCO"
-
-    return None
-
-
-def _restore_original_severity_labels(crashes, mapping):
-    """Preserve original severity labels after applying field mapping.
-
-    apply_field_mapping() creates normalized KABCO values for calculations.
-    This helper makes sure the UI filter/legend still has the original labels
-    from the mapped severity column.
-    """
-
-    if crashes is None or crashes.empty or not mapping:
-        return crashes
-
-    severity_col = mapping.get("severity")
-
-    if severity_col and severity_col in crashes.columns:
-        original_labels = (
-            crashes[severity_col]
-            .fillna("Unknown")
-            .astype(str)
-            .str.strip()
-            .replace("", "Unknown")
-        )
-
-        crashes["DashboardSeverityLabel"] = original_labels
-        crashes["CrashSeverityLabel"] = original_labels
-
-        # Save the source column name so reruns/filtering can find it.
-        st.session_state["mapped_severity_col"] = severity_col
-        st.session_state["kabco_severity_col"] = severity_col
-
-    return crashes
 
 def _clip_crashes_to_boundary(crashes, selected_boundary):
     if selected_boundary is None or crashes is None or crashes.empty:
@@ -252,29 +128,132 @@ def _render_crash_filters(crashes, source_key="crash"):
         "**Crash data filters**"
     )
 
+    def _clean_key(value):
+        return (
+            str(value)
+            .strip()
+            .lower()
+            .replace(" ", "_")
+            .replace("-", "_")
+        )
+
     def _find_first_column(candidates):
         normalized = {
-            str(c).lower().replace(" ", "_"): c
+            _clean_key(c): c
             for c in crashes.columns
         }
 
         compact = {
-            str(c).lower().replace(" ", "").replace("_", ""): c
+            _clean_key(c).replace("_", ""): c
             for c in crashes.columns
         }
 
         for name in candidates:
-            if name in normalized:
-                return normalized[name]
-            if name in compact:
-                return compact[name]
+            key = _clean_key(name)
+            if key in normalized:
+                return normalized[key]
+            key_compact = key.replace("_", "")
+            if key_compact in compact:
+                return compact[key_compact]
 
         return None
+
+    def _valid_filter_values(col):
+        if col is None or col not in crashes.columns:
+            return []
+
+        values = (
+            crashes[col]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+        values = values[
+            (values != "")
+            & (values.str.lower() != "nan")
+            & (values.str.lower() != "none")
+            & (values.str.lower() != "null")
+        ]
+
+        if values.empty:
+            return []
+
+        return sorted(values.replace("", "Unknown").unique())
+
+    def _choose_severity_filter_column():
+        """Choose the user-facing severity field, not the calculation field.
+
+        Different datasets may store severity as:
+        - K/A/B/C/O only
+        - text labels, e.g. Fatal, Serious Injury, No Injury
+        - combined labels, e.g. Fatal (K), Evident, Incapacitating (A)
+
+        The app creates DashboardSeverityLabel / CrashSeverityLabel during field
+        mapping.  Those are the preferred filter/legend fields.  KABCO is only a
+        normalized internal calculation field and is used as a last fallback.
+        """
+
+        preferred = [
+            "DashboardSeverityLabel",
+            "CrashSeverityLabel",
+            "SeverityLabel",
+            "OriginalSeverity",
+            "Severity_Original",
+        ]
+
+        for col in preferred:
+            found = _find_first_column([col])
+            values = _valid_filter_values(found)
+            if found is not None and values:
+                return found
+
+        mapping = st.session_state.get("crash_field_mapping", {}) or {}
+        mapped_severity = mapping.get("severity", "")
+        if mapped_severity and mapped_severity in crashes.columns:
+            values = _valid_filter_values(mapped_severity)
+            if values:
+                return mapped_severity
+
+        # Upload and FARS mapping widgets store their own mapping state.
+        for state_key in [
+            "upload_crash_field_mapping_values",
+            "fars_crash_field_mapping_values",
+        ]:
+            mapping = st.session_state.get(state_key, {}) or {}
+            mapped_severity = mapping.get("severity", "")
+            if mapped_severity and mapped_severity in crashes.columns:
+                values = _valid_filter_values(mapped_severity)
+                if values:
+                    return mapped_severity
+
+        likely_original_cols = [
+            "Severity",
+            "CRASH_SEVERITY",
+            "CrashSeverity",
+            "Crash Severity",
+            "InjurySeverity",
+            "INJURY_SEVERITY",
+            "Most_Severe_Injury",
+            "MOST_SEVERE_INJURY",
+            "SeverityName",
+            "SEVERITY",
+        ]
+
+        for col in likely_original_cols:
+            found = _find_first_column([col])
+            values = _valid_filter_values(found)
+            if found is not None and values:
+                return found
+
+        # Last fallback only.  This is correct for datasets where the original
+        # severity field really is K/A/B/C/O, or for FARS where all rows are K.
+        return _find_first_column(["KABCO", "DashboardKABCO", "k_a_b_c_o"])
 
     preferred_filters = []
 
     year_col = _find_first_column(
         [
+            "DashboardCrashYear",
             "year",
             "crash_year",
             "u_year",
@@ -285,13 +264,11 @@ def _render_crash_filters(crashes, source_key="crash"):
         ]
     )
 
-    # Use the original mapped severity labels for the user-facing filter.
-    # Do not use the normalized KABCO field unless there is no original
-    # severity-label column available.
-    severity_label_col = _get_original_severity_filter_column(crashes)
+    severity_col = _choose_severity_filter_column()
 
     crash_type_col = _find_first_column(
         [
+            "DashboardCrashType",
             "crash_type",
             "collision_type",
             "manner_of_collision",
@@ -307,7 +284,7 @@ def _render_crash_filters(crashes, source_key="crash"):
         ),
         (
             "Crash severity",
-            severity_label_col
+            severity_col
         ),
         (
             "Crash Type",
@@ -316,7 +293,6 @@ def _render_crash_filters(crashes, source_key="crash"):
     ]:
         if (
             col is not None
-            and col in crashes.columns
             and col not in [
                 item[1]
                 for item in preferred_filters
@@ -333,9 +309,7 @@ def _render_crash_filters(crashes, source_key="crash"):
 
         for label, col in preferred_filters:
 
-            values = _clean_unique_text_values(
-                crashes[col].fillna("Unknown")
-            )
+            values = _valid_filter_values(col)
 
             if not values:
                 continue
@@ -344,13 +318,7 @@ def _render_crash_filters(crashes, source_key="crash"):
                 label,
                 values,
                 default=values,
-                key=f"filter_{source_key}_{label.lower().replace(' ', '_')}_{col}",
-                help=(
-                    "This uses the original mapped severity labels. "
-                    "KSI/EPDO calculations still use normalized KABCO codes."
-                    if label == "Crash severity"
-                    else None
-                )
+                key=f"filter_{source_key}_{label.lower().replace(' ', '_')}_{col}"
             )
 
             filter_values = [str(v).strip() for v in selected_values]
@@ -370,7 +338,6 @@ def _render_crash_filters(crashes, source_key="crash"):
         )
 
     return crashes
-
 
 def _render_data_size_and_quality_notes():
     with st.expander("App limits and data quality notes", expanded=False):
@@ -451,16 +418,14 @@ def render_crashes_step(st_folium, workflow_context, spatial_unit=None):
                     4326
                 )
 
+                crashes_loaded.attrs["CrashSource"] = "LOCAL_UPLOAD"
+
                 mapping = render_field_mapping_ui(
                     st,
                     crashes_loaded,
                     key_prefix="upload_crash_field_mapping"
                 )
                 crashes_loaded = apply_field_mapping(
-                    crashes_loaded,
-                    mapping
-                )
-                crashes_loaded = _restore_original_severity_labels(
                     crashes_loaded,
                     mapping
                 )
@@ -753,16 +718,14 @@ def render_crashes_step(st_folium, workflow_context, spatial_unit=None):
                     county_code=county_code if str(county_code).strip() else None,
                 ).to_crs(4326)
 
+                crashes_loaded.attrs["CrashSource"] = "FARS"
+
                 mapping = render_field_mapping_ui(
                     st,
                     crashes_loaded,
                     key_prefix="fars_crash_field_mapping"
                 )
                 crashes_loaded = apply_field_mapping(
-                    crashes_loaded,
-                    mapping
-                )
-                crashes_loaded = _restore_original_severity_labels(
                     crashes_loaded,
                     mapping
                 )
