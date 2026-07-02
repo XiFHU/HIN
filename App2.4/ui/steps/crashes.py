@@ -115,6 +115,32 @@ def _clip_crashes_to_boundary(crashes, selected_boundary):
         return crashes
 
 
+def _clean_filter_label_series(series):
+    """Return clean user-facing filter labels."""
+    return (
+        series
+        .fillna("Unknown")
+        .astype(str)
+        .str.strip()
+        .replace("", "Unknown")
+    )
+
+
+def _valid_filter_values(series):
+    values = _clean_filter_label_series(series)
+    values = values[
+        ~values.str.lower().isin(
+            [
+                "",
+                "nan",
+                "none",
+                "null"
+            ]
+        )
+    ]
+    return sorted(values.unique())
+
+
 def _render_crash_filters(crashes, source_key="crash"):
     if crashes is None:
         return crashes
@@ -131,9 +157,19 @@ def _render_crash_filters(crashes, source_key="crash"):
             for c in crashes.columns
         }
 
+        normalized_compact = {
+            str(c).lower().replace(" ", "").replace("_", ""): c
+            for c in crashes.columns
+        }
+
         for name in candidates:
-            if name in normalized:
-                return normalized[name]
+            key = str(name).lower().replace(" ", "_")
+            if key in normalized:
+                return normalized[key]
+
+            compact_key = str(name).lower().replace(" ", "").replace("_", "")
+            if compact_key in normalized_compact:
+                return normalized_compact[compact_key]
 
         return None
 
@@ -141,6 +177,7 @@ def _render_crash_filters(crashes, source_key="crash"):
 
     year_col = _find_first_column(
         [
+            "DashboardCrashYear",
             "year",
             "crash_year",
             "u_year",
@@ -151,29 +188,79 @@ def _render_crash_filters(crashes, source_key="crash"):
         ]
     )
 
-    # Use the original mapped severity labels for the user-facing filter.
-    # The normalized KABCO field is still kept for calculations.
+    # User-facing severity filter should use the original mapped severity labels.
+    # The normalized KABCO column remains available for KSI/EPDO/calculations,
+    # but it should not drive the filter/legend when labels exist.
     severity_label_col = _find_first_column(
         [
-            "dashboardseveritylabel",
-            "crashseveritylabel",
+            "DashboardSeverityLabel",
+            "CrashSeverityLabel",
+            "SeverityLabel",
             "severity_label",
             "crash_severity_label"
         ]
     )
 
-    kabco_col = severity_label_col or _find_first_column(
-        [
-            "kabco",
-            "k_a_b_c_o",
-            "severity",
-            "crash_severity",
-            "injury_severity"
-        ]
+    mapped_severity_col = None
+    crash_mapping = st.session_state.get(
+        "crash_field_mapping",
+        {}
     )
+    if isinstance(crash_mapping, dict):
+        mapped_severity_col = crash_mapping.get(
+            "severity",
+            None
+        )
+
+    if (
+        mapped_severity_col
+        and mapped_severity_col in crashes.columns
+    ):
+        severity_filter_col = mapped_severity_col
+    elif (
+        severity_label_col
+        and severity_label_col in crashes.columns
+    ):
+        severity_filter_col = severity_label_col
+    else:
+        severity_filter_col = _find_first_column(
+            [
+                "Severity",
+                "severity",
+                "CrashSeverity",
+                "crash_severity",
+                "InjurySeverity",
+                "injury_severity",
+                "KABCO",
+                "k_a_b_c_o"
+            ]
+        )
+
+    # If the chosen severity filter has only normalized K/A/B/C/O values but a
+    # richer label column exists, use the richer labels instead.
+    if (
+        severity_filter_col
+        and severity_label_col
+        and severity_label_col in crashes.columns
+        and severity_filter_col in crashes.columns
+    ):
+        try:
+            current_values = set(_valid_filter_values(crashes[severity_filter_col]))
+            label_values = set(_valid_filter_values(crashes[severity_label_col]))
+            normalized_codes = {"K", "A", "B", "C", "O", "UNKNOWN"}
+            if (
+                current_values
+                and current_values.issubset(normalized_codes)
+                and len(label_values) >= len(current_values)
+                and label_values != current_values
+            ):
+                severity_filter_col = severity_label_col
+        except Exception:
+            pass
 
     crash_type_col = _find_first_column(
         [
+            "DashboardCrashType",
             "crash_type",
             "collision_type",
             "manner_of_collision",
@@ -188,8 +275,8 @@ def _render_crash_filters(crashes, source_key="crash"):
             year_col
         ),
         (
-            "Severity",
-            kabco_col
+            "Crash severity",
+            severity_filter_col
         ),
         (
             "Crash Type",
@@ -198,6 +285,7 @@ def _render_crash_filters(crashes, source_key="crash"):
     ]:
         if (
             col is not None
+            and col in crashes.columns
             and col not in [
                 item[1]
                 for item in preferred_filters
@@ -214,53 +302,50 @@ def _render_crash_filters(crashes, source_key="crash"):
 
         for label, col in preferred_filters:
 
-            values = sorted(
+            values = _valid_filter_values(
                 crashes[col]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .replace("", "Unknown")
-                .unique()
             )
+
+            # If a previous session stored values that no longer exist, reset
+            # to all current values so the filter does not get stuck on only K.
+            key = f"filter_{source_key}_{label.lower().replace(' ', '_')}_{col}"
+            if key in st.session_state:
+                previous = [
+                    str(v).strip()
+                    for v in st.session_state.get(key, [])
+                ]
+                if any(v not in values for v in previous):
+                    st.session_state.pop(key, None)
 
             selected_values = st.multiselect(
                 label,
                 values,
                 default=values,
-                key=f"filter_{source_key}_{label.lower().replace(' ', '_')}_{col}"
+                key=key
             )
 
-            filter_values = [str(v).strip() for v in selected_values]
-            crashes = crashes[
-                crashes[col]
-                .fillna("Unknown")
-                .astype(str)
-                .str.strip()
-                .replace("", "Unknown")
-                .isin(filter_values)
-            ].copy()
+            filter_values = [
+                str(v).strip()
+                for v in selected_values
+            ]
+
+            if filter_values:
+                clean_values = _clean_filter_label_series(
+                    crashes[col]
+                )
+                crashes = crashes[
+                    clean_values.isin(filter_values)
+                ].copy()
+            else:
+                crashes = crashes.iloc[0:0].copy()
 
     else:
 
         st.info(
-            "No Year, KABCO, or Crash Type filter columns detected."
+            "No Year, Severity, or Crash Type filter columns detected."
         )
 
     return crashes
-
-
-def _render_data_size_and_quality_notes():
-    with st.expander("App limits and data quality notes", expanded=False):
-        st.markdown(
-            """
-- **OSM signal accuracy:** OSM signal points are volunteered/contributed data. Signal locations, missing signals, and duplicate signal nodes can affect intersection/corridor building.
-- **OSM road classes:** OSM `highway` classes are useful for screening but may not match agency functional classification.
-- **TIGER roads:** TIGER is broad national road geometry. It is useful for coverage, but road class/detail and geometry can be less precise than local agency centerlines.
-- **Uploaded crash/FARS fields:** Different agencies use different column names. Use the Crash Field Mapping panel to confirm crash ID, date/year, crash type, severity, and injury-count fields.
-- **Large datasets:** For Streamlit Cloud, keep uploads and map layers moderate. Very large OSM extracts, statewide roads, or hundreds of thousands of crashes may need pre-filtering, road-class filtering, or local workstation processing.
-- **Map performance:** Interactive Folium maps can slow down when many thousands of features are drawn. Use Top N / Top percent filters for display when needed.
-            """
-        )
 
 
 def render_crashes_step(st_folium, workflow_context, spatial_unit=None):
