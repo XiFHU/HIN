@@ -9,6 +9,7 @@ from modules.fars import (
 from modules.crash_field_mapping import (
     render_field_mapping_ui,
     apply_field_mapping,
+    normalize_kabco_value,
 )
 from ..map_symbology import (
     categorical_color_lookup,
@@ -64,6 +65,164 @@ def derive_kabco_from_count_columns(
     df["CrashSeverityLabel"] = df["DashboardSeverityLabel"]
 
     return df
+
+
+def _clean_filter_text_series(series):
+    values = (
+        series
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+    values = values[
+        (values != "")
+        & (values.str.lower() != "nan")
+        & (values.str.lower() != "none")
+        & (values.str.lower() != "null")
+    ]
+    return values
+
+
+def _unique_clean_values(df, col):
+    if df is None or col is None or col not in df.columns:
+        return []
+    values = _clean_filter_text_series(df[col])
+    if values.empty:
+        return []
+    return sorted(values.replace("", "Unknown").unique())
+
+
+def _is_normalized_kabco_value_list(values):
+    valid = {"K", "A", "B", "C", "O"}
+    clean_values = {
+        str(v).strip().upper()
+        for v in values
+        if str(v).strip() != ""
+    }
+    return bool(clean_values) and clean_values.issubset(valid)
+
+
+def _best_original_single_severity_column(df, mapping=None):
+    """
+    Pick the original user-facing severity column for the single-column mode.
+
+    This intentionally prefers agency labels such as Fatal (K), Serious Injury,
+    No Injury, etc. over normalized calculation columns such as KABCO.
+    If the source dataset truly only has a K/A/B/C/O text column, it can still
+    return that column.
+    """
+    if df is None or df.empty:
+        return None
+
+    mapping = mapping or {}
+
+    likely_names = [
+        mapping.get("severity", ""),
+        "Severity",
+        "Crash Severity",
+        "CRASH_SEVERITY",
+        "CrashSeverity",
+        "InjurySeverity",
+        "INJURY_SEVERITY",
+        "Most_Severe_Injury",
+        "MOST_SEVERE_INJURY",
+        "SeverityName",
+        "SEVERITY",
+        "k_a_b_c_o",
+        "KABCO",
+    ]
+
+    existing = []
+    lower_lookup = {str(c).strip().lower(): c for c in df.columns}
+    compact_lookup = {
+        str(c).strip().lower().replace(" ", "").replace("_", "").replace("-", ""): c
+        for c in df.columns
+    }
+
+    for name in likely_names:
+        if not name:
+            continue
+        if name in df.columns:
+            col = name
+        else:
+            key = str(name).strip().lower()
+            compact_key = key.replace(" ", "").replace("_", "").replace("-", "")
+            col = lower_lookup.get(key) or compact_lookup.get(compact_key)
+        if col and col not in existing:
+            existing.append(col)
+
+    scored = []
+    calculation_cols = {
+        "kabco",
+        "dashboardkabco",
+        "dashboardseveritylabel",
+        "crashseveritylabel",
+    }
+
+    for col in existing:
+        values = _unique_clean_values(df, col)
+        if not values:
+            continue
+
+        col_key = str(col).strip().lower().replace("_", "")
+        is_calc_col = col_key in calculation_cols
+        is_kabco_code_only = _is_normalized_kabco_value_list(values)
+        unique_count = len(values)
+
+        # Highest priority: mapped/raw agency text labels with multiple values.
+        # Lower priority: calculated columns and K/A/B/C/O-only values.
+        score = 0
+        if str(col) == str(mapping.get("severity", "")):
+            score += 100
+        if not is_calc_col:
+            score += 50
+        if not is_kabco_code_only:
+            score += 30
+        if unique_count > 1:
+            score += 20
+        score += min(unique_count, 10)
+
+        scored.append((score, col, values))
+
+    if not scored:
+        return None
+
+    scored.sort(reverse=True, key=lambda item: item[0])
+    return scored[0][1]
+
+
+def restore_single_severity_from_source(df, mapping=None):
+    """
+    Force single-column severity mode to use the mapped/original severity column.
+
+    This prevents columns such as Fatalities/fatals/count fields from turning a
+    local all-crash file into all K. FARS is handled separately by true FARS
+    detection inside apply_field_mapping().
+    """
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+    sev_col = _best_original_single_severity_column(out, mapping)
+
+    if sev_col is None or sev_col not in out.columns:
+        return out
+
+    labels = (
+        out[sev_col]
+        .fillna("Unknown")
+        .astype(str)
+        .str.strip()
+        .replace({"": "Unknown"})
+    )
+
+    out["DashboardSeverityLabel"] = labels
+    out["CrashSeverityLabel"] = labels
+    out["DashboardKABCO"] = out[sev_col].map(normalize_kabco_value)
+    out["KABCO"] = out["DashboardKABCO"]
+    out["SeverityFilterSourceColumn"] = sev_col
+
+    return out
 
 
 def _clear_downstream_results_after_crash_change():
@@ -193,6 +352,59 @@ def _render_crash_filters(crashes, source_key="crash"):
         normalized internal calculation field and is used as a last fallback.
         """
 
+        # If the upload branch saved the true source column, use it first.
+        source_col = crashes.attrs.get("SeverityFilterSourceColumn", None)
+        if source_col and source_col in crashes.columns:
+            values = _valid_filter_values(source_col)
+            if values:
+                return source_col
+
+        if "SeverityFilterSourceColumn" in crashes.columns:
+            source_values = _valid_filter_values("SeverityFilterSourceColumn")
+            if source_values:
+                source_col = str(crashes["SeverityFilterSourceColumn"].dropna().astype(str).iloc[0])
+                if source_col in crashes.columns and _valid_filter_values(source_col):
+                    return source_col
+
+        # Prefer the mapping's original severity column before any generated
+        # Dashboard/KABCO column. This is critical when a local file has both
+        # a Fatalities count column and a separate Severity text column.
+        mapping_candidates = []
+        for state_key in [
+            "upload_crash_field_mapping_values",
+            "crash_field_mapping",
+            "fars_crash_field_mapping_values",
+        ]:
+            mapping = st.session_state.get(state_key, {}) or {}
+            mapped_severity = mapping.get("severity", "")
+            if mapped_severity and mapped_severity not in mapping_candidates:
+                mapping_candidates.append(mapped_severity)
+
+        for mapped_severity in mapping_candidates:
+            if mapped_severity and mapped_severity in crashes.columns:
+                values = _valid_filter_values(mapped_severity)
+                if values:
+                    return mapped_severity
+
+        likely_original_cols = [
+            "Severity",
+            "CRASH_SEVERITY",
+            "CrashSeverity",
+            "Crash Severity",
+            "InjurySeverity",
+            "INJURY_SEVERITY",
+            "Most_Severe_Injury",
+            "MOST_SEVERE_INJURY",
+            "SeverityName",
+            "SEVERITY",
+        ]
+
+        for col in likely_original_cols:
+            found = _find_first_column([col])
+            values = _valid_filter_values(found)
+            if found is not None and values:
+                return found
+
         preferred = [
             "DashboardSeverityLabel",
             "CrashSeverityLabel",
@@ -206,25 +418,6 @@ def _render_crash_filters(crashes, source_key="crash"):
             values = _valid_filter_values(found)
             if found is not None and values:
                 return found
-
-        mapping = st.session_state.get("crash_field_mapping", {}) or {}
-        mapped_severity = mapping.get("severity", "")
-        if mapped_severity and mapped_severity in crashes.columns:
-            values = _valid_filter_values(mapped_severity)
-            if values:
-                return mapped_severity
-
-        # Upload and FARS mapping widgets store their own mapping state.
-        for state_key in [
-            "upload_crash_field_mapping_values",
-            "fars_crash_field_mapping_values",
-        ]:
-            mapping = st.session_state.get(state_key, {}) or {}
-            mapped_severity = mapping.get("severity", "")
-            if mapped_severity and mapped_severity in crashes.columns:
-                values = _valid_filter_values(mapped_severity)
-                if values:
-                    return mapped_severity
 
         likely_original_cols = [
             "Severity",
@@ -314,12 +507,16 @@ def _render_crash_filters(crashes, source_key="crash"):
             if not values:
                 continue
 
+            value_signature = str(abs(hash(tuple(values))))
             selected_values = st.multiselect(
                 label,
                 values,
                 default=values,
-                key=f"filter_{source_key}_{label.lower().replace(' ', '_')}_{col}"
+                key=f"filter_{source_key}_{label.lower().replace(' ', '_')}_{col}_{value_signature}"
             )
+
+            if label == "Crash severity":
+                st.caption(f"Severity filter source: `{col}`")
 
             filter_values = [str(v).strip() for v in selected_values]
             crashes = crashes[
@@ -443,6 +640,25 @@ def render_crashes_step(st_folium, workflow_context, spatial_unit=None):
                     horizontal=False,
                     key="crash_severity_format"
                 )
+
+                if severity_format == "Single KABCO / severity column":
+
+                    crashes_loaded = restore_single_severity_from_source(
+                        crashes_loaded,
+                        mapping
+                    )
+
+                    source_col = crashes_loaded.get(
+                        "SeverityFilterSourceColumn",
+                        None
+                    )
+
+                    if source_col is not None:
+                        source_col_values = source_col.dropna().astype(str).unique()
+                        if len(source_col_values) > 0:
+                            st.caption(
+                                f"Severity labels are read from: `{source_col_values[0]}`"
+                            )
 
                 if severity_format == "Five numeric KABCO count columns":
 
