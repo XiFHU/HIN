@@ -8240,27 +8240,192 @@ def _top_hin_routes_for_recommendations(tables, top_n=5):
     return out
 
 
+
+
+def _intersection_route_lookup_from_session():
+    """Build SignalID/UnitID -> readable Route 1 / Route 2 labels.
+
+    Intersection buffers preserve SignalID where available.  The signal-to-road
+    table stores one row per nearby route for that signal.  This helper uses
+    those existing workflow tables only for report/dashboard labels; it does
+    not change spatial-unit creation or crash assignment.
+    """
+    try:
+        signals = st.session_state.get("signals_with_corridor", None)
+    except Exception:
+        signals = None
+
+    if signals is None or getattr(signals, "empty", True):
+        return {}
+
+    sig = _drop_geometry(signals).copy()
+    sig_id_col = _normal_col(sig, ["SignalID", "signal_id", "intersection_id", "IntersectionID"])
+    route_col = _normal_col(sig, ["Route", "RouteName", "FULLNAME", "RoadName", "Route_Normalized"])
+
+    if not sig_id_col or not route_col or sig_id_col not in sig.columns or route_col not in sig.columns:
+        return {}
+
+    sig[sig_id_col] = sig[sig_id_col].astype(str).str.strip()
+    sig[route_col] = sig[route_col].map(_clean_route_name_for_report)
+    sig = sig[(sig[sig_id_col] != "") & (sig[route_col] != "")].copy()
+
+    if sig.empty:
+        return {}
+
+    lookup = {}
+    for sid, group in sig.groupby(sig_id_col, dropna=False):
+        routes = []
+        seen = set()
+        for value in group[route_col].tolist():
+            route = _clean_route_name_for_report(value)
+            key = route.lower()
+            if route and key not in seen:
+                routes.append(route)
+                seen.add(key)
+        if not routes:
+            continue
+        label = " / ".join(routes[:2]) if len(routes) >= 2 else routes[0]
+        sid_text = str(sid).strip()
+        lookup[sid_text] = label
+        # Common UnitID pattern for intersection buffers.
+        if sid_text.replace(".", "", 1).isdigit():
+            try:
+                sid_int = str(int(float(sid_text)))
+                lookup[sid_int] = label
+                lookup[f"INT_{sid_int}"] = label
+                lookup[f"Intersection {sid_int}"] = label
+            except Exception:
+                pass
+    return lookup
+
+
+def _intersection_label_from_report_row(row):
+    """Return a route-pair label for an intersection row if it can be recovered."""
+    lookup = _intersection_route_lookup_from_session()
+    if not lookup:
+        return ""
+
+    cols = list(getattr(row, "index", []))
+    candidate_cols = [
+        "SignalID",
+        "signal_id",
+        "intersection_id",
+        "IntersectionID",
+        "UnitID",
+        "Spatial unit id",
+    ]
+
+    for cand in candidate_cols:
+        for col in cols:
+            key = str(col).lower().replace("_", "").replace(" ", "")
+            ckey = str(cand).lower().replace("_", "").replace(" ", "")
+            if key == ckey or ckey in key:
+                raw = str(row.get(col, "")).strip()
+                if not raw:
+                    continue
+                candidates = [raw]
+                # INT_92 -> 92
+                m = re.search(r"(\d+)", raw)
+                if m:
+                    candidates.extend([m.group(1), f"INT_{m.group(1)}"])
+                # 92.0 -> 92
+                try:
+                    as_int = str(int(float(raw)))
+                    candidates.extend([as_int, f"INT_{as_int}"])
+                except Exception:
+                    pass
+                for value in candidates:
+                    if value in lookup:
+                        return lookup[value]
+    return ""
+
+def _location_label_for_report_row(row, unit_type=""):
+    """Build a readable location label for report recommendations.
+
+    Intersections should show the two crossing road names when available.
+    Corridors/segments should show the route name when available.  This helper
+    is report text only and does not change any analysis calculations.
+    """
+    cols = list(getattr(row, "index", []))
+
+    def val_from(candidates):
+        for cand in candidates:
+            for col in cols:
+                key = str(col).lower().replace("_", "").replace(" ", "")
+                ckey = str(cand).lower().replace("_", "").replace(" ", "")
+                if key == ckey or ckey in key:
+                    value = _clean_route_name_for_report(row.get(col, ""))
+                    if value:
+                        return value
+        return ""
+
+    road1 = val_from(["RoadName1", "Road1", "Route1", "Street1", "FromRoad", "PrimaryRoad", "Approach1"])
+    road2 = val_from(["RoadName2", "Road2", "Route2", "Street2", "ToRoad", "CrossStreet", "Approach2"])
+    if road1 and road2:
+        return f"{road1} / {road2}"
+
+    is_intersection = "intersection" in str(unit_type or "").lower()
+    unit_text = val_from(["UnitID", "IntersectionID", "Spatial unit id"])
+    if unit_text.upper().startswith("INT_"):
+        is_intersection = True
+    try:
+        if str(st.session_state.get("analysis_type", "")).lower().startswith("intersection"):
+            is_intersection = True
+    except Exception:
+        pass
+
+    if is_intersection:
+        enriched = _intersection_label_from_report_row(row)
+        if enriched:
+            return enriched
+
+    route = val_from(["Route", "FULLNAME", "RoadName", "RouteName", "CorridorRoute", "RouteName_Calc", "FacilityName"])
+    if route:
+        return route
+
+    unit = val_from(["UnitID", "IntersectionID", "CorridorID", "SegmentID", "SegID", "Spatial unit id"])
+    return unit or "selected location"
+
+
 def _top_density_locations_for_recommendations(tables, top_n=6):
+    """Top crash-density locations with analysis-aware labels.
+
+    For intersection reports, Location is built from Route 1 / Route 2 when
+    those columns exist.  For corridor reports, Location is the route/corridor
+    name.  For segment reports, Location falls back to route or unit ID.
+    """
     density = tables.get("Crash density results")
     if density is None or getattr(density, "empty", True):
         return pd.DataFrame()
+
     df = _drop_geometry(density).copy()
     density_col = _normal_col(df, ["CrashDensity", "Crash_Density", "crash_density"])
+    count_col = _crash_count_col(df)
+    unit_col = _unit_col(df) or _normal_col(df, ["UnitID", "IntersectionID", "CorridorID", "SegmentID", "SegID"])
+    unit_type_col = _normal_col(df, ["UnitType", "IntersectionType", "CorridorType", "SegmentType"])
+
     if not density_col:
         return pd.DataFrame()
+
     df[density_col] = pd.to_numeric(df[density_col], errors="coerce").fillna(0)
-    route_col = _normal_col(df, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"])
-    unit_col = _unit_col(df) or _normal_col(df, ["UnitID", "IntersectionID", "CorridorID", "SegmentID", "SegID"])
-    label_col = route_col or unit_col
-    if not label_col:
-        return pd.DataFrame()
-    df[label_col] = df[label_col].map(_clean_route_name_for_report)
-    df = df[df[label_col].ne("")].copy()
+    df = df.sort_values(density_col, ascending=False).head(top_n).copy()
     if df.empty:
         return pd.DataFrame()
-    out = df.sort_values(density_col, ascending=False).head(top_n).copy()
-    out = out.rename(columns={label_col: "Location", density_col: "CrashDensity"})
-    return out[[c for c in ["Location", "CrashDensity", unit_col] if c and c in out.columns]].reset_index(drop=True)
+
+    locations = []
+    for _, row in df.iterrows():
+        unit_type = str(row.get(unit_type_col, "")) if unit_type_col else ""
+        locations.append(_location_label_for_report_row(row, unit_type=unit_type))
+
+    out = pd.DataFrame({
+        "Location": locations,
+        "CrashDensity": pd.to_numeric(df[density_col], errors="coerce").fillna(0).values,
+    })
+    if count_col and count_col in df.columns:
+        out["CrashCount"] = pd.to_numeric(df[count_col], errors="coerce").fillna(0).astype(int).values
+    if unit_col and unit_col in df.columns:
+        out["UnitID"] = df[unit_col].astype(str).values
+    return out.reset_index(drop=True)
 
 
 def _top_crash_patterns_for_recommendations(crashes, top_n=3):
@@ -8276,12 +8441,87 @@ def _top_crash_patterns_for_recommendations(crashes, top_n=3):
     return list(s.value_counts().head(top_n).index)
 
 
-def _add_recommendations_section(doc, tables):
-    """Add data-driven screening recommendations to the Word report."""
-    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+def _recommendation_priority_context(tables):
+    """Return analysis-specific priority language for the report.
+
+    HIN is used only for segment/HIN reports.  Intersection and corridor
+    reports use the crash-density / spatial-unit results so the recommendation
+    text matches the workflow that generated the report.
+    """
+    analysis_type = _report_analysis_type(tables).lower()
+    density_locs = _top_density_locations_for_recommendations(tables, top_n=6)
+
+    if "intersection" in analysis_type:
+        names = _join_report_names(density_locs["Location"].tolist() if not density_locs.empty else [], max_items=6)
+        first = _clean_route_name_for_report(density_locs["Location"].iloc[0]) if not density_locs.empty else "the highest-ranked intersection"
+        return {
+            "mode": "intersection",
+            "heading1": "1. Prioritize high-risk intersections for detailed safety review",
+            "priority_type": "Intersection",
+            "priority_issue": "High crash-density / KSI screening priority",
+            "first_location": first,
+            "location_names": names,
+            "paragraph1": (
+                f"Begin detailed safety review at {names}, because these signalized intersections appear in the highest crash-density or injury-priority rankings. "
+                "Review each intersection by Route 1 / Route 2, crash diagram, crash severity, signal phasing, turn-lane operations, queueing, pedestrian/bicycle conditions, lighting, and sight distance before selecting countermeasures."
+                if names else
+                "Use the highest-ranked signalized intersections from the result table as the starting point for detailed safety diagnosis. Review each location by Route 1 / Route 2 before selecting countermeasures."
+            ),
+            "paragraph2": "Use the intersection ranking table to identify near-term spot-treatment candidates. These are location-specific priorities rather than corridor-level HIN priorities.",
+            "follow_up": "Intersection crash diagram and operations review",
+            "countermeasure": "Signal operations, turn-lane review, pedestrian/bicycle treatments, visibility, and quick-build spot safety treatments",
+        }
+
+    if "corridor" in analysis_type:
+        names = _join_report_names(density_locs["Location"].tolist() if not density_locs.empty else [], max_items=6)
+        first = _clean_route_name_for_report(density_locs["Location"].iloc[0]) if not density_locs.empty else "the highest-ranked corridor"
+        return {
+            "mode": "corridor",
+            "heading1": "1. Prioritize high-risk corridors for detailed safety review",
+            "priority_type": "Corridor",
+            "priority_issue": "High corridor crash-density / injury screening priority",
+            "first_location": first,
+            "location_names": names,
+            "paragraph1": (
+                f"Begin corridor-level safety diagnosis on {names}, because these route corridors appear in the highest crash-density or injury-priority rankings. "
+                "For each route, review crash diagrams, signal spacing, access spacing, turn-lane operations, queueing, speed environment, lighting, and pedestrian/bicycle context before selecting countermeasures."
+                if names else
+                "Use the highest-ranked route corridors from the result table as the starting point for detailed safety diagnosis."
+            ),
+            "paragraph2": "Use the corridor ranking table to identify the first route corridors for follow-up review, and separately note any short high-density locations that may be suitable for spot treatments.",
+            "follow_up": "Corridor safety diagnosis",
+            "countermeasure": "Signal operations, access management, speed management, intersection review, and systemic corridor treatments",
+        }
+
+    # Segment / HIN report
     hin_routes = _top_hin_routes_for_recommendations(tables, top_n=5)
+    route_names = _join_report_names(hin_routes["Route"].tolist() if not hin_routes.empty else [], max_items=5)
+    first_route = _clean_route_name_for_report(hin_routes["Route"].iloc[0]) if not hin_routes.empty else "the highest-ranked HIN segment or route"
+    return {
+        "mode": "segment",
+        "heading1": "1. Prioritize HIN segments and routes for detailed safety review",
+        "priority_type": "HIN segment / route",
+        "priority_issue": "High HIN screening score",
+        "first_location": first_route,
+        "location_names": route_names,
+        "paragraph1": (
+            f"Begin detailed safety diagnosis on {route_names}, because these routes appear in the highest HIN/risk rankings. "
+            f"Treat {first_route} as an initial priority because it has the highest HIN screening score in the current results."
+            if route_names else
+            "Use the highest-ranked HIN segments, windows, or routes from the result table as the starting point for detailed safety diagnosis."
+        ),
+        "paragraph2": "Review high crash-density locations separately from the HIN route priorities so the implementation plan can address both systemic injury risk and localized crash clusters.",
+        "follow_up": "Segment / corridor safety diagnosis",
+        "countermeasure": "Speed management, access management, signal operations, intersection review, and systemic safety treatments",
+    }
+
+
+def _add_recommendations_section(doc, tables):
+    """Add data-driven, workflow-aware screening recommendations."""
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
     density_locs = _top_density_locations_for_recommendations(tables, top_n=6)
     patterns = _top_crash_patterns_for_recommendations(crashes, top_n=3)
+    context = _recommendation_priority_context(tables)
 
     doc.add_heading("Key recommendations and suggested next steps", level=1)
     doc.add_paragraph(
@@ -8289,63 +8529,65 @@ def _add_recommendations_section(doc, tables):
         "They are intended to identify where detailed safety diagnosis should begin; they do not replace field review, crash-diagram review, or engineering judgment."
     )
 
-    route_names = _join_report_names(hin_routes["Route"].tolist() if not hin_routes.empty else [], max_items=5)
-    first_route = _clean_route_name_for_report(hin_routes["Route"].iloc[0]) if not hin_routes.empty else "the highest-ranked HIN corridor"
-    doc.add_heading("1. Prioritize HIN corridors for detailed safety review", level=2)
-    if route_names:
-        doc.add_paragraph(
-            f"Begin corridor-level safety diagnosis on {route_names}, because these routes appear in the highest HIN/risk rankings. "
-            f"Treat {first_route} as an initial priority because it has the highest HIN screening score in the current results."
-        )
-    else:
-        doc.add_paragraph(
-            "Use the highest-ranked HIN routes or windows from the result table as the starting point for detailed safety diagnosis."
-        )
-    doc.add_paragraph(
-        "For these corridors, review crash diagrams, signal spacing, turn-lane operations, access spacing, queueing, speed environment, lighting, and pedestrian/bicycle context before selecting countermeasures."
-    )
+    doc.add_heading(context["heading1"], level=2)
+    doc.add_paragraph(context["paragraph1"])
 
-    doc.add_heading("2. Separate corridor priorities from spot-treatment candidates", level=2)
+    doc.add_heading("2. Use the ranking results to identify near-term follow-up locations", level=2)
     density_names = _join_report_names(density_locs["Location"].tolist() if not density_locs.empty else [], max_items=6)
-    if density_names:
-        doc.add_paragraph(
-            f"Review high crash-density locations such as {density_names} as potential near-term spot-treatment candidates. "
-            "These locations should be considered separately from the corridor-level HIN priorities so the implementation plan can address both systemic risk and localized crash clusters."
-        )
+    if context["mode"] == "intersection":
+        if density_names:
+            doc.add_paragraph(
+                f"Review high crash-density intersections such as {density_names} as near-term candidates for site-level safety review. "
+                "These locations should be confirmed using crash diagrams, field observations, and signal operations review."
+            )
+        else:
+            doc.add_paragraph("Use the intersection crash-density ranking table to identify near-term site-level safety review candidates.")
+    elif context["mode"] == "corridor":
+        if density_names:
+            doc.add_paragraph(
+                f"Review high-priority corridors such as {density_names} for corridor-level diagnosis. "
+                "Within each route, identify whether the crash pattern is corridor-wide or concentrated at specific intersections or short segments."
+            )
+        else:
+            doc.add_paragraph("Use the corridor crash-density ranking table to identify route corridors for near-term follow-up review.")
     else:
-        doc.add_paragraph(
-            "Use the crash-density ranking table to identify near-term spot-treatment candidates, and keep those locations separate from broader HIN corridor priorities."
-        )
+        if density_names:
+            doc.add_paragraph(
+                f"Review high crash-density locations such as {density_names} as potential near-term spot-treatment candidates. "
+                "These locations should be considered separately from the HIN segment or route priorities so the implementation plan can address both systemic risk and localized crash clusters."
+            )
+        else:
+            doc.add_paragraph("Use the crash-density ranking table to identify near-term spot-treatment candidates alongside the HIN screening results.")
 
     doc.add_heading("3. Target dominant crash patterns after location-level validation", level=2)
     pattern_text = _join_report_names(patterns, max_items=3)
     if pattern_text:
         doc.add_paragraph(
             f"The leading crash patterns in the current dataset include {pattern_text}. "
-            "Use these patterns as a starting point for diagnosis, then confirm the pattern at each priority corridor or segment before selecting treatments."
+            "Use these patterns as a starting point for diagnosis, then confirm the pattern at each priority location before selecting treatments."
         )
     else:
-        doc.add_paragraph(
-            "Review crash type, severity, and location patterns at each priority corridor or segment before selecting treatments."
-        )
+        doc.add_paragraph("Review crash type, severity, and location patterns at each priority location before selecting treatments.")
 
     doc.add_heading("4. Validate data and assumptions before programming projects", level=2)
     doc.add_paragraph(
-        "Confirm crash geocoding, crash-year coverage, severity/KSI mapping, roadway segmentation, selected road-class filters, and HIN threshold settings before using the results for funding or project programming. "
+        "Confirm crash geocoding, crash-year coverage, severity/KSI mapping, roadway segmentation or unit definitions, selected road-class filters, and threshold settings before using the results for funding or project programming. "
         "Locations already improved or already programmed should be flagged during the follow-up review."
     )
 
     doc.add_heading("5. Convert the screening into an action matrix", level=2)
     doc.add_paragraph(
-        "Prepare a short implementation matrix listing each priority corridor or spot location, the main safety issue, likely contributing factors, recommended follow-up review, potential countermeasure category, timeframe, and responsible lead."
+        "Prepare a short implementation matrix listing each priority location, the main safety issue, likely contributing factors, recommended follow-up review, potential countermeasure category, timeframe, and responsible lead."
     )
+    first_location = context.get("first_location") or "Highest-ranked location"
+    second_location = _clean_route_name_for_report(density_locs["Location"].iloc[0]) if not density_locs.empty else "Highest crash-density location"
     matrix_rows = [
-        [first_route if first_route else "Highest-ranked HIN corridor", "HIN corridor", "High HIN screening score", "Corridor safety diagnosis", "Signal operations, access management, speed management, intersection review", "Near-term study", "Agency to assign"],
-        [density_locs["Location"].iloc[0] if not density_locs.empty else "Highest crash-density location", "Spot location", "Localized crash concentration", "Site-level crash review", "Quick-build or spot safety treatment", "Short term", "Agency to assign"],
+        [first_location, context["priority_type"], context["priority_issue"], context["follow_up"], context["countermeasure"], "Near-term study", "Agency to assign"],
     ]
+    if second_location and second_location.lower() != str(first_location).lower():
+        matrix_rows.append([second_location, "Spot location", "Localized crash concentration", "Site-level crash review", "Quick-build or spot safety treatment", "Short term", "Agency to assign"])
     action_df = pd.DataFrame(matrix_rows, columns=["Priority location", "Priority type", "Main safety issue", "Follow-up review", "Potential countermeasure category", "Timeframe", "Lead"])
     _add_dataframe_table(doc, action_df, max_rows=10)
-
 
 def _export_dashboard_docx(tables, selected_blocks, selected_maps, extra_figures=None, maps=None, overlay_layers=None, report_timezone=None):
     """Word report export with data-driven recommendations and KSI-only table names."""
@@ -8411,3 +8653,231 @@ def _export_dashboard_docx(tables, selected_blocks, selected_maps, extra_figures
     doc.save(buffer)
     buffer.seek(0)
     return buffer.getvalue()
+
+# --- V16 workflow-specific dashboard/report map fixes -------------------------
+# These overrides only change dashboard/report map selection and static map
+# metric selection. They do not change crash assignment, crash density, corridor,
+# signal, or HIN calculations.
+
+def _metric_for_map(gdf, map_name):
+    cols = list(getattr(gdf, "columns", []))
+    name = str(map_name or "").lower()
+
+    if "hin" in name:
+        for c in ["HIN_Priority_Index", "RiskScore", "CrashDensity", "CrashCount", "Crash_Count"]:
+            if c in cols:
+                return c
+
+    if "count" in name:
+        for c in ["CrashCount", "Crash_Count", "TotalCrashes", "Total_Crashes", "CrashDensity", "CrashDensity_per_mile"]:
+            if c in cols:
+                return c
+
+    if "density" in name:
+        for c in ["CrashDensity", "CrashDensity_per_mile", "CrashCount", "Crash_Count"]:
+            if c in cols:
+                return c
+
+    for c in ["CrashDensity", "HIN_Priority_Index", "CrashCount", "Crash_Count"]:
+        if c in cols:
+            return c
+
+    try:
+        nums = _numeric_cols(_drop_geometry(gdf))
+        return nums[0] if nums else None
+    except Exception:
+        return None
+
+
+def _available_maps(st):
+    """Return only maps that match the current workflow.
+
+    This prevents stale intersection maps or context-only corridor layers from
+    appearing in a corridor report after the user previously ran a different
+    workflow in the same session.
+    """
+    maps = {}
+    density = st.session_state.get("spatial_units_density_map")
+    analysis_type = str(
+        st.session_state.get(
+            "analysis_type",
+            st.session_state.get("spatial_unit_selector", st.session_state.get("spatial_unit", ""))
+        )
+    ).lower()
+
+    if density is not None and not getattr(density, "empty", True):
+        density_map = _repair_gdf_crs(density, st)
+
+        if "intersection" in analysis_type:
+            # Intersection reports should show one map: crash count by intersection.
+            maps["Crash count map"] = density_map
+
+        elif "corridor" in analysis_type:
+            # Corridor reports should show both crash count and crash density,
+            # using the corridor spatial-unit result layer, not the separate
+            # corridor-context layer.
+            maps["Crash count map"] = density_map
+            maps["Crash density map"] = density_map
+
+        else:
+            # Segment and generic workflows keep crash density as the primary
+            # spatial-unit map. HIN maps are added below when available.
+            maps["Crash density map"] = density_map
+
+    results = st.session_state.get("section7_results")
+    if results is not None and "intersection" not in analysis_type and "corridor" not in analysis_type:
+        risk_segments = results.get("risk_segments") if isinstance(results, dict) else None
+        if risk_segments is not None and not getattr(risk_segments, "empty", True):
+            hin_map = _repair_gdf_crs(risk_segments, st)
+            maps["HIN priority map"] = hin_map
+            metric = _dashboard_hin_metric(hin_map)
+            if metric:
+                work = hin_map.copy()
+                work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+                avg = work[metric].mean()
+                med = work[metric].median()
+                maps["HIN above average map"] = work[work[metric] >= avg].copy()
+                maps["HIN above median map"] = work[work[metric] >= med].copy()
+
+    return {
+        k: v
+        for k, v in maps.items()
+        if v is not None and not getattr(v, "empty", True)
+    }
+
+
+def _dashboard_default_map_selection(maps):
+    names = list(maps.keys())
+    preferred = [
+        name for name in ["Crash count map", "Crash density map", "HIN priority map"]
+        if name in maps
+    ]
+    return preferred[:2] if preferred else names[: min(2, len(names))]
+
+
+def _sanitize_dashboard_map_state(st, maps):
+    """Remove map names that no longer exist for the active workflow."""
+    key = "dash_builder_map_layers"
+    valid_names = list(maps.keys())
+    previous = st.session_state.get(key, None)
+    if previous is None:
+        return
+    if not isinstance(previous, (list, tuple, set)):
+        previous = [previous]
+    cleaned = [name for name in previous if name in valid_names]
+    if not cleaned:
+        cleaned = _dashboard_default_map_selection(maps)
+    if list(previous) != cleaned:
+        st.session_state[key] = cleaned
+
+
+def _render_dashboard_builder(st, tables):
+    maps = _available_maps(st)
+    _sanitize_dashboard_map_state(st, maps)
+
+    custom_figures = st.session_state.get("dashboard_custom_figures", [])
+    default_figures = _build_default_figures(tables) + custom_figures
+    figure_titles = [title for title, _, _ in default_figures]
+
+    st.markdown("<div class='dashboard-section-title'>Dashboard builder <span>choose charts, tables, and map layers for one review page</span></div>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([0.27, 0.27, 0.46], gap="large")
+    with c1:
+        st.markdown("**Charts and figures**")
+        selected_blocks = st.multiselect("Select dashboard charts", figure_titles, default=figure_titles[: min(5, len(figure_titles))], key="dash_builder_chart_blocks")
+        include_tables = st.checkbox("Include ranking/data table previews", value=True, key="dash_builder_include_tables")
+        if custom_figures and st.button("Clear added custom charts", key="clear_custom_dashboard_charts"):
+            st.session_state["dashboard_custom_figures"] = []
+            st.rerun()
+    with c2:
+        st.markdown("**Map layers**")
+        if maps:
+            selected_maps = st.multiselect(
+                "Select dashboard maps",
+                list(maps.keys()),
+                default=_dashboard_default_map_selection(maps),
+                key="dash_builder_map_layers",
+                help="Dashboard maps are read-only and limited to the active workflow, so old intersection/corridor maps do not carry into the report.",
+            )
+        else:
+            selected_maps = []
+            st.caption("No dashboard maps are available for the current workflow yet.")
+
+        overlay_sources = _workflow_overlay_sources(st)
+        selected_overlays = st.multiselect(
+            "Optional workflow layers on dashboard maps",
+            list(overlay_sources.keys()),
+            default=[name for name in ["Roads"] if name in overlay_sources],
+            key="dash_builder_overlay_layers",
+            help="Only selected context layers are included in the dashboard and report maps. Signals are not included unless you select Signals.",
+        )
+    with c3:
+        st.markdown("**Exports**")
+        st.caption("Export the dashboard as a static PNG summary or a Word report with charts, map summaries, and decision-ready tables.")
+        report_timezone = st.selectbox("Report time zone", ["America/Denver", "Local/server time", "UTC", "America/Chicago", "America/Los_Angeles", "America/New_York"], index=0, key="dashboard_report_timezone", help="Streamlit Cloud often runs in UTC. Choose the local project timezone so the report timestamp matches your expected local time.")
+        report_tz_value = None if report_timezone == "Local/server time" else report_timezone
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            png_bytes = _export_summary_image(tables, "png", extra_figures=custom_figures)
+            if png_bytes:
+                st.download_button("Download PNG", data=png_bytes, file_name="hin_dashboard_summary.png", mime="image/png", key="dash_export_png")
+            else:
+                st.caption("PNG needs kaleido")
+        with d2:
+            selected_maps = [m for m in selected_maps if m in maps]
+            docx_bytes = _export_dashboard_docx(tables, selected_blocks, selected_maps, extra_figures=custom_figures, maps=maps, overlay_layers={name: overlay_sources[name] for name in selected_overlays if name in overlay_sources}, report_timezone=report_tz_value)
+            if docx_bytes is not None:
+                st.download_button("Download Word report", data=docx_bytes, file_name=_report_docx_filename(tables), mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="dash_export_docx")
+            else:
+                st.info("Install python-docx for Word export.")
+        with d3:
+            data_zip_bytes = _download_generated_data_zip(st, tables)
+            if data_zip_bytes:
+                st.download_button(
+                    "Download all generated data ZIP",
+                    data=data_zip_bytes,
+                    file_name="hin_generated_data_export.zip",
+                    mime="application/zip",
+                    key="dash_export_generated_data_zip",
+                    help="Exports workflow-generated tables and GIS layers as CSV and GeoJSON files. This does not change analysis results.",
+                )
+            else:
+                st.caption("Run workflow steps before exporting data.")
+
+    st.markdown("<div class='dashboard-section-title'>Generated dashboard</div>", unsafe_allow_html=True)
+    chart_titles = set(selected_blocks)
+    for i in range(0, len(default_figures), 2):
+        cols = st.columns(2)
+        for j, col in enumerate(cols):
+            idx = i + j
+            if idx >= len(default_figures):
+                continue
+            title, fig, data = default_figures[idx]
+            if title not in chart_titles:
+                continue
+            with col:
+                fig.update_layout(height=330, margin=dict(l=20, r=20, t=45, b=35))
+                st.plotly_chart(_polish_figure(fig), width="stretch", key=f"dash_generated_fig_{idx}")
+
+    selected_maps = [m for m in selected_maps if m in maps]
+    if selected_maps:
+        map_cols = st.columns(min(2, len(selected_maps)))
+        for i, map_name in enumerate(selected_maps[:2]):
+            with map_cols[i % len(map_cols)]:
+                st.markdown(f"**{map_name}**")
+                _render_dashboard_map(
+                    st,
+                    map_name,
+                    maps[map_name],
+                    key=f"dash_map_{_safe_name(map_name)}_{i}",
+                    height=420,
+                    overlay_layers={name: overlay_sources[name] for name in selected_overlays if name in overlay_sources},
+                )
+
+    if include_tables:
+        st.markdown("**Dashboard table preview**")
+        compact_tables = _report_tables(tables)
+        if compact_tables:
+            table_name = st.selectbox("Preview table", list(compact_tables.keys()), key="dash_builder_preview_table")
+            st.dataframe(_safe_dataframe_for_display(compact_tables[table_name]).head(25), width="stretch", hide_index=True)
+        else:
+            st.info("No report-ready result tables are available yet.")
