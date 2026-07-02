@@ -3,6 +3,62 @@
 from modules.defaults import SIGNAL_DEFAULTS
 
 
+def _clear_downstream_after_signal_change():
+    """Clear workflow outputs that depend on the active signal set."""
+    for k in [
+        "signals_with_corridor",
+        "signals_for_corridors",
+        "corridor_signal_summary",
+        "corridors",
+        "final_corridors",
+        "dropped_corridor_ids",
+        "applied_dropped_corridor_ids",
+        "spatial_units",
+        "spatial_units_density_map",
+        "assigned_crashes",
+        "kabco_result",
+        "analysis_type",
+        "classified",
+        "unit_col",
+        "section7_results",
+        "section7_original_density",
+        "section7_crashes_for_map",
+    ]:
+        st.session_state.pop(k, None)
+
+
+def _sort_signal_id(value):
+    """Sort signal IDs numerically when possible, otherwise as text."""
+    text = str(value)
+    try:
+        return (0, float(text))
+    except Exception:
+        return (1, text)
+
+
+def _apply_dropped_osm_signals(signals_all, dropped_signal_ids):
+    """Return active OSM signals after removing selected SignalID values."""
+    if signals_all is None:
+        return signals_all
+
+    active = signals_all.copy()
+
+    if "SignalID" not in active.columns:
+        active["SignalID"] = active.index + 1
+
+    drop_ids = {
+        str(v)
+        for v in list(dropped_signal_ids or [])
+    }
+
+    if drop_ids:
+        active = active[
+            ~active["SignalID"].astype(str).isin(drop_ids)
+        ].copy()
+
+    return active.reset_index(drop=True)
+
+
 def render_signals_step(st_folium, workflow_context, spatial_unit=None):
     globals().update(workflow_context)
 
@@ -112,64 +168,18 @@ def render_signals_step(st_folium, workflow_context, spatial_unit=None):
                         signals_clean["City"] = city_name
 
                         st.session_state[
+                            "signals_clean_all"
+                        ] = signals_clean.copy()
+
+                        st.session_state[
                             "signals_clean"
-                        ] = signals_clean
+                        ] = signals_clean.copy()
+
                         st.session_state["signal_source_label"] = "OSM traffic signals"
+                        st.session_state["dropped_signal_ids"] = []
+                        st.session_state["applied_dropped_signal_ids"] = []
 
-                        st.session_state.pop(
-                            "signals_with_corridor",
-                            None
-                        )
-
-                        st.session_state.pop(
-                            "signals_for_corridors",
-                            None
-                        )
-
-                        st.session_state.pop(
-                            "corridors",
-                            None
-                        )
-
-                        st.session_state.pop(
-                            "final_corridors",
-                            None
-                        )
-
-                        st.session_state.pop(
-                            "dropped_corridor_ids",
-                            None
-                        )
-
-                        st.session_state.pop(
-                            "applied_dropped_corridor_ids",
-                            None
-                        )
-
-                        st.session_state.pop(
-                            "corridor_signal_summary",
-                            None
-                        )
-
-                        st.session_state.pop(
-                            "spatial_units",
-                            None
-                        )
-
-                        st.session_state.pop(
-                            "assigned_crashes",
-                            None
-                        )
-
-                        st.session_state.pop(
-                            "kabco_result",
-                            None
-                        )
-
-                        st.session_state.pop(
-                            "section7_results",
-                            None
-                        )
+                        _clear_downstream_after_signal_change()
 
                         st.session_state[
                             "active_map_layer"
@@ -277,18 +287,124 @@ def render_signals_step(st_folium, workflow_context, spatial_unit=None):
                             signals_clean["City"] = city_name
                             st.session_state["signals_clean"] = signals_clean
                             st.session_state["signal_source_label"] = "Uploaded signal point file"
-                            for k in [
-                                "signals_with_corridor", "signals_for_corridors", "corridors", "final_corridors",
-                                "dropped_corridor_ids", "applied_dropped_corridor_ids", "corridor_signal_summary",
-                                "spatial_units", "assigned_crashes", "kabco_result", "section7_results"
-                            ]:
-                                st.session_state.pop(k, None)
+                            st.session_state.pop("signals_clean_all", None)
+                            st.session_state.pop("dropped_signal_ids", None)
+                            st.session_state.pop("applied_dropped_signal_ids", None)
+                            _clear_downstream_after_signal_change()
                             st.session_state["active_map_layer"] = "Signals"
                             st.success(f"Loaded {len(signals_clean):,} uploaded signal points.")
                         except Exception as e:
                             st.error(f"Unable to create uploaded signal layer: {e}")
 
     if signals_clean is not None:
+
+        signal_source_label = st.session_state.get(
+            "signal_source_label",
+            ""
+        )
+
+        if signal_source_label == "OSM traffic signals":
+            signals_all = st.session_state.get(
+                "signals_clean_all",
+                None
+            )
+
+            if signals_all is None:
+                signals_all = signals_clean.copy()
+                st.session_state["signals_clean_all"] = signals_all.copy()
+
+            if "SignalID" not in signals_all.columns:
+                signals_all = signals_all.copy()
+                signals_all["SignalID"] = signals_all.index + 1
+                st.session_state["signals_clean_all"] = signals_all.copy()
+
+            signal_id_options = sorted(
+                signals_all["SignalID"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist(),
+                key=_sort_signal_id
+            )
+
+            default_drop_ids = [
+                signal_id
+                for signal_id in st.session_state.get(
+                    "dropped_signal_ids",
+                    []
+                )
+                if str(signal_id) in signal_id_options
+            ]
+
+            with st.expander(
+                "Review / Drop OSM signals",
+                expanded=False
+            ):
+                drop_signal_ids = st.multiselect(
+                    "Drop signals by SignalID before building intersections or corridors",
+                    options=signal_id_options,
+                    default=default_drop_ids,
+                    key="signals_drop_by_id_select",
+                    help=(
+                        "Dropped OSM signals are removed from the active cleaned signal layer. "
+                        "Intersection buffers, corridor generation, crash assignment, and results "
+                        "will use only the remaining signals."
+                    )
+                )
+
+                current_drop_ids = set(
+                    str(v)
+                    for v in drop_signal_ids
+                )
+
+                previous_applied_drop_ids = set(
+                    str(v)
+                    for v in st.session_state.get(
+                        "applied_dropped_signal_ids",
+                        []
+                    )
+                )
+
+                active_signals = _apply_dropped_osm_signals(
+                    signals_all,
+                    drop_signal_ids
+                )
+
+                st.session_state["dropped_signal_ids"] = list(
+                    drop_signal_ids
+                )
+                st.session_state["signals_clean"] = active_signals
+                signals_clean = active_signals
+
+                if current_drop_ids != previous_applied_drop_ids:
+                    st.session_state[
+                        "applied_dropped_signal_ids"
+                    ] = list(drop_signal_ids)
+
+                    _clear_downstream_after_signal_change()
+
+                    st.session_state[
+                        "active_map_layer"
+                    ] = "Signals"
+
+                    if drop_signal_ids:
+                        st.info(
+                            "Signal drop list changed. Downstream intersection, corridor, "
+                            "classification, density, and HIN results were cleared so they can "
+                            "be rebuilt from the active signal set."
+                        )
+
+                st.write(
+                    f"Original OSM signals: {len(signals_all):,} | "
+                    f"Dropped: {len(drop_signal_ids):,} | "
+                    f"Active signals: {len(signals_clean):,}"
+                )
+
+                if signals_clean.empty:
+                    st.warning(
+                        "All OSM signals are currently dropped. Keep at least one signal "
+                        "before building intersections or corridors."
+                    )
 
         st.subheader("Cleaned Signal Table")
 

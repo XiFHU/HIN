@@ -29,6 +29,9 @@ def _clear_downstream_results_after_road_change():
 
     for k in [
         "signals_clean",
+        "signals_clean_all",
+        "dropped_signal_ids",
+        "applied_dropped_signal_ids",
         "signals_with_corridor",
         "signals_for_corridors",
         "corridor_signal_summary",
@@ -1335,6 +1338,9 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                     "route_col",
                     "segment_id_col",
                     "signals_clean",
+                    "signals_clean_all",
+                    "dropped_signal_ids",
+                    "applied_dropped_signal_ids",
                     "signals_with_corridor",
                     "signals_for_corridors",
                     "corridor_signal_summary",

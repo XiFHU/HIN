@@ -446,7 +446,10 @@ def _preferred_crash_columns(crashes):
         return []
     groups = [
         ["Year", "CrashYear", "caseyear", "CaseYear", "YEAR"],
-        ["KABCO", "Severity", "severity", "CrashSeverity", "CRASH_SEVERITY", "INJURY_SEVERITY"],
+        # Prefer original mapped severity labels for legends.  The normalized
+        # KABCO field remains available for calculations, but map legends should
+        # show labels from the user's severity column when available.
+        ["DashboardSeverityLabel", "CrashSeverityLabel", "Severity", "severity", "CrashSeverity", "CRASH_SEVERITY", "INJURY_SEVERITY", "KABCO"],
         ["CrashType", "Crash_Type", "crash_type", "MannerCollision", "FirstHarmfulEvent", "UnitType"],
     ]
     cols = []

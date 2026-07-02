@@ -151,7 +151,18 @@ def _render_crash_filters(crashes, source_key="crash"):
         ]
     )
 
-    kabco_col = _find_first_column(
+    # Use the original mapped severity labels for the user-facing filter.
+    # The normalized KABCO field is still kept for calculations.
+    severity_label_col = _find_first_column(
+        [
+            "dashboardseveritylabel",
+            "crashseveritylabel",
+            "severity_label",
+            "crash_severity_label"
+        ]
+    )
+
+    kabco_col = severity_label_col or _find_first_column(
         [
             "kabco",
             "k_a_b_c_o",
@@ -177,7 +188,7 @@ def _render_crash_filters(crashes, source_key="crash"):
             year_col
         ),
         (
-            "KABCO",
+            "Severity",
             kabco_col
         ),
         (
@@ -207,6 +218,8 @@ def _render_crash_filters(crashes, source_key="crash"):
                 crashes[col]
                 .dropna()
                 .astype(str)
+                .str.strip()
+                .replace("", "Unknown")
                 .unique()
             )
 
@@ -217,10 +230,14 @@ def _render_crash_filters(crashes, source_key="crash"):
                 key=f"filter_{source_key}_{label.lower().replace(' ', '_')}_{col}"
             )
 
+            filter_values = [str(v).strip() for v in selected_values]
             crashes = crashes[
                 crashes[col]
+                .fillna("Unknown")
                 .astype(str)
-                .isin(selected_values)
+                .str.strip()
+                .replace("", "Unknown")
+                .isin(filter_values)
             ].copy()
 
     else:

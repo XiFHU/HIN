@@ -316,6 +316,19 @@ def apply_field_mapping(df, mapping):
 
     sev_col = col("severity")
     if sev_col:
+        # Keep the user-facing severity labels exactly as they appear in the
+        # mapped severity column.  Filters, legends, and color-by-severity
+        # controls should show agency labels such as "Fatal (K)" or
+        # "Evident Incapacitating (A)".  A separate normalized KABCO code is
+        # still created for calculations such as KSI, EPDO, and KABCO summaries.
+        out["DashboardSeverityLabel"] = (
+            out[sev_col]
+            .fillna("Unknown")
+            .astype(str)
+            .str.strip()
+            .replace({"": "Unknown"})
+        )
+        out["CrashSeverityLabel"] = out["DashboardSeverityLabel"]
         out["DashboardKABCO"] = out[sev_col].map(normalize_kabco_value)
     else:
         # Derive one representative severity per crash from person-count fields.
@@ -329,8 +342,11 @@ def apply_field_mapping(df, mapping):
         out.loc[b > 0, "DashboardKABCO"] = "B"
         out.loc[a > 0, "DashboardKABCO"] = "A"
         out.loc[k > 0, "DashboardKABCO"] = "K"
+        out["DashboardSeverityLabel"] = out["DashboardKABCO"]
+        out["CrashSeverityLabel"] = out["DashboardSeverityLabel"]
 
-    # If a KABCO field exists, overwrite with normalized values for consistent charts.
+    # Keep KABCO as a normalized calculation field.  Do not use it for the
+    # user-facing severity filter/legend when DashboardSeverityLabel exists.
     if "DashboardKABCO" in out.columns:
         out["KABCO"] = out["DashboardKABCO"]
 
@@ -346,6 +362,8 @@ def apply_field_mapping(df, mapping):
     out["DashboardNoInjury"] = _as_numeric_series(out, noinj_col)
     if is_fars_fatal_only_dataset(out):
         out["DashboardKABCO"] = "K"
+        out["DashboardSeverityLabel"] = "Fatal (K)"
+        out["CrashSeverityLabel"] = out["DashboardSeverityLabel"]
         out["KABCO"] = "K"
         if "DashboardFatalities" not in out.columns or pd.to_numeric(out["DashboardFatalities"], errors="coerce").fillna(0).sum() == 0:
             out["DashboardFatalities"] = 1
