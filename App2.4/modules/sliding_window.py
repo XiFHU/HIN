@@ -4,6 +4,7 @@ import pandas as pd
 import geopandas as gpd
 import folium
 
+from modules.crash_density import resolve_crash_id_col
 from shapely.ops import substring, linemerge, unary_union
 
 def section7_clean_risk_segments(
@@ -126,6 +127,92 @@ def clean_linestring(geom):
 
     return None
 
+
+
+def prepare_unique_crash_id_column(crashes_df, crash_id_col=None):
+    """Create a stable internal unique crash ID column for Section 7 counts."""
+
+    crashes_work = crashes_df.copy()
+    resolved_id_col = resolve_crash_id_col(
+        crashes_work,
+        crash_id_col=crash_id_col,
+    )
+
+    if resolved_id_col is not None:
+        ids = (
+            crashes_work[resolved_id_col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        fallback_ids = pd.Series(
+            [f"ROW_{i + 1}" for i in range(len(crashes_work))],
+            index=crashes_work.index,
+        )
+        crashes_work["__S7_UniqueCrashID"] = ids.where(
+            ids != "",
+            fallback_ids,
+        )
+        crashes_work["CrashID_S7"] = crashes_work["__S7_UniqueCrashID"]
+    else:
+        crashes_work["__S7_UniqueCrashID"] = [
+            f"ROW_{i + 1}" for i in range(len(crashes_work))
+        ]
+        crashes_work["CrashID_S7"] = crashes_work["__S7_UniqueCrashID"]
+
+    return crashes_work, resolved_id_col
+
+
+def unique_crash_count(crashes_df):
+    """Count unique crashes from the internal Section 7 crash ID column."""
+
+    if crashes_df is None or crashes_df.empty:
+        return 0
+
+    if "__S7_UniqueCrashID" in crashes_df.columns:
+        return int(
+            crashes_df["__S7_UniqueCrashID"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", np.nan)
+            .nunique()
+        )
+
+    return int(len(crashes_df))
+
+
+def unique_epdo_total(crashes_df):
+    """Sum one EPDO value per unique crash, using the maximum duplicate value."""
+
+    if crashes_df is None or crashes_df.empty:
+        return 0
+
+    if "EPDO" not in crashes_df.columns:
+        return unique_crash_count(crashes_df)
+
+    if "__S7_UniqueCrashID" not in crashes_df.columns:
+        return float(pd.to_numeric(crashes_df["EPDO"], errors="coerce").fillna(0).sum())
+
+    work = crashes_df[["__S7_UniqueCrashID", "EPDO"]].copy()
+    work["__S7_UniqueCrashID"] = (
+        work["__S7_UniqueCrashID"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    work = work[work["__S7_UniqueCrashID"] != ""]
+
+    if work.empty:
+        return 0
+
+    work["EPDO"] = pd.to_numeric(work["EPDO"], errors="coerce").fillna(0)
+
+    return float(
+        work.groupby("__S7_UniqueCrashID")["EPDO"]
+        .max()
+        .sum()
+    )
 
 def segment_line(line, segment_len_m):
     rows = []
@@ -300,13 +387,12 @@ def assign_crashes_to_routes(
     crashes_proj,
     route_lines,
     route_col,
-    max_dist_m
+    max_dist_m,
+    crash_id_col=None
 ):
-    crashes_work = crashes_proj.copy()
-
-    crashes_work["CrashID_S7"] = range(
-        1,
-        len(crashes_work) + 1
+    crashes_work, _ = prepare_unique_crash_id_column(
+        crashes_proj,
+        crash_id_col=crash_id_col,
     )
 
     joined = gpd.sjoin_nearest(
@@ -411,13 +497,9 @@ def create_sliding_windows(
                 )
             ].copy()
 
-            crash_count = len(c)
+            crash_count = unique_crash_count(c)
 
-            epdo_total = (
-                c["EPDO"].sum()
-                if "EPDO" in c.columns
-                else crash_count
-            )
+            epdo_total = unique_epdo_total(c)
 
             length_mi = (
                 end_m - start_m
@@ -690,7 +772,8 @@ def run_sliding_window_risk_analysis(
     kabco_col=None,
     epdo_weights=None,
     segment_id_col=None,
-    min_crash_count=None
+    min_crash_count=None,
+    crash_id_col=None
 ):
     roads_work = roads.copy()
     crashes_work = crashes.copy()
@@ -757,7 +840,8 @@ def run_sliding_window_risk_analysis(
         crashes_proj,
         route_lines,
         route_col,
-        crash_snap_dist_m
+        crash_snap_dist_m,
+        crash_id_col=crash_id_col
     )
 
     if risk_metric in [

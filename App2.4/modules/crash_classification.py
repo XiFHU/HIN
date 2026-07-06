@@ -3,6 +3,7 @@
 import geopandas as gpd
 import pandas as pd
 from shapely.ops import substring
+from modules.crash_density import resolve_crash_id_col
 
 
 PROJECTED_CRS = "EPSG:26913"
@@ -320,16 +321,22 @@ def assign_crashes_to_units(
 
 def summarize_kabco(
     assigned_crashes,
-    unit_id_col="UnitID"
+    unit_id_col="UnitID",
+    crash_id_col=None
 ):
     """
     Summarize KABCO by spatial unit.
+
+    Total is the count of unique crash records, using the mapped/canonical crash
+    ID when available. K/A/B/C/O columns are also counted by unique crash ID so
+    person-injury count columns do not inflate crash totals.
     """
 
     if assigned_crashes is None or assigned_crashes.empty:
         return pd.DataFrame()
 
     possible_kabco_cols = [
+        "DashboardKABCO",
         "KABCO",
         "kabco",
         "Severity",
@@ -342,37 +349,85 @@ def summarize_kabco(
 
     kabco_col = None
 
-    for c in assigned_crashes.columns:
-        if c in possible_kabco_cols:
+    for c in possible_kabco_cols:
+        if c in assigned_crashes.columns:
             kabco_col = c
             break
 
+    resolved_crash_id_col = resolve_crash_id_col(
+        assigned_crashes,
+        crash_id_col=crash_id_col,
+    )
+
+    work = assigned_crashes.copy()
+
+    if resolved_crash_id_col is not None:
+        work[resolved_crash_id_col] = (
+            work[resolved_crash_id_col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        valid_id_mask = work[resolved_crash_id_col] != ""
+        if valid_id_mask.any():
+            work = work[valid_id_mask].copy()
+        else:
+            resolved_crash_id_col = None
+
     if kabco_col is None:
+        if resolved_crash_id_col is not None:
+            summary = (
+                work.groupby(unit_id_col)[resolved_crash_id_col]
+                .nunique()
+                .reset_index(name="Total")
+            )
+        else:
+            summary = (
+                work.groupby(unit_id_col)
+                .size()
+                .reset_index(name="Total")
+            )
+
+        return summary
+
+    work[kabco_col] = (
+        work[kabco_col]
+        .fillna("Unknown")
+        .astype(str)
+        .str.strip()
+    )
+
+    if resolved_crash_id_col is not None:
         summary = (
-            assigned_crashes
-            .groupby(unit_id_col)
+            work.groupby([unit_id_col, kabco_col])[resolved_crash_id_col]
+            .nunique()
+            .unstack(fill_value=0)
+            .reset_index()
+        )
+
+        totals = (
+            work.groupby(unit_id_col)[resolved_crash_id_col]
+            .nunique()
+            .reset_index(name="Total")
+        )
+    else:
+        summary = (
+            work.groupby([unit_id_col, kabco_col])
+            .size()
+            .unstack(fill_value=0)
+            .reset_index()
+        )
+
+        totals = (
+            work.groupby(unit_id_col)
             .size()
             .reset_index(name="Total")
         )
 
-        return summary
-
-    summary = (
-        assigned_crashes
-        .groupby([unit_id_col, kabco_col])
-        .size()
-        .unstack(fill_value=0)
-        .reset_index()
-    )
-
-    numeric_cols = [
-        c for c in summary.columns
-        if c != unit_id_col
-    ]
-
-    summary["Total"] = (
-        summary[numeric_cols]
-        .sum(axis=1)
+    summary = summary.merge(
+        totals,
+        on=unit_id_col,
+        how="left"
     )
 
     return summary

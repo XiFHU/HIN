@@ -3595,8 +3595,15 @@ def _month_trend_table(crashes):
 def _crash_id_col(df):
     if df is None:
         return None
-    preferred = ["CrashID", "SourceCrashID", "st_case", "ST_CASE", "case_id", "CaseID", "CrashNumber", "OBJECTID"]
-    return _exact_or_contains_col(df, preferred, contains=["crashid", "caseid"])
+    mapped_col = st.session_state.get("mapped_crash_id_col", "")
+    if mapped_col and mapped_col in df.columns:
+        return mapped_col
+    preferred = [
+        "DashboardCrashID", "SourceCrashID", "CrashID", "CrashId",
+        "crash_id", "CRASH_ID", "Crash_ID", "st_case", "ST_CASE",
+        "case_id", "CASE_ID", "CaseID", "CrashNumber", "OBJECTID"
+    ]
+    return _exact_or_contains_col(df, preferred, contains=["dashboardcrashid", "sourcecrashid", "crashid", "caseid", "stcase"])
 
 
 def _unique_crash_count(df, mask=None):
@@ -6563,11 +6570,18 @@ def _available_maps(st):
 
 
 def _dashboard_crash_id_col(df):
+    if df is None:
+        return None
+    mapped_col = st.session_state.get("mapped_crash_id_col", "")
+    if mapped_col and mapped_col in df.columns:
+        return mapped_col
     return _normal_col(
         df,
         [
-            "CrashID", "CrashId", "crash_id", "CRASH_ID", "CaseID", "CASE_ID",
-            "OBJECTID", "ObjectID", "FID", "RecordID", "UnitID", "Crash_Key",
+            "DashboardCrashID", "SourceCrashID", "CrashID", "CrashId",
+            "crash_id", "CRASH_ID", "Crash_ID", "CaseID", "CASE_ID",
+            "ST_CASE", "st_case", "OBJECTID", "ObjectID", "FID",
+            "RecordID", "UnitID", "Crash_Key",
         ],
     )
 

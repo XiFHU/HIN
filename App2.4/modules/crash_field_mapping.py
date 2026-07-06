@@ -145,61 +145,21 @@ def _first_existing_column(df, candidates):
 
 
 def is_fars_fatal_only_dataset(df):
-    """Return True only for true FARS fatal-crash datasets.
+    """Return True for the FARS Accident fatal-crash dataset.
 
-    Important distinction:
-    - FARS Accident data is fatal-crash-only.  Every record should be K.
-    - Local all-crash files can also contain fields such as ``Fatalities`` or
-      ``SourceCrashID``.  Those are count/id fields and must NOT force every
-      record to K.  Local data must use the mapped severity column.
-
-    Therefore, this detector uses either an explicit FARS source flag or the
-    true FARS Accident structure.  It never uses ``Fatalities`` alone.
+    FARS Accident rows are fatal crashes only.  Injury-count columns in the
+    Accident table should not be interpreted as local K/A/B/C/O crash counts.
     """
     if df is None or getattr(df, "empty", True):
         return False
-
-    # Explicit source flag set by the FARS workflow/parser.
-    try:
-        source_attr = str(getattr(df, "attrs", {}).get("CrashSource", "")).strip().upper()
-        if source_attr == "FARS":
-            return True
-    except Exception:
-        pass
-
     if "CrashSource" in df.columns:
         try:
-            source_values = (
-                df["CrashSource"]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .str.upper()
-                .unique()
-            )
-            if len(source_values) > 0 and all(v == "FARS" for v in source_values):
+            if df["CrashSource"].dropna().astype(str).str.upper().eq("FARS").any():
                 return True
         except Exception:
             pass
-
-    cols = {str(c).strip().lower() for c in df.columns}
-
-    # Native NHTSA FARS Accident export structure before standardization.
-    # The user-provided example has: caseyear, state, st_case, fatals.
-    fars_required = {"caseyear", "state", "st_case", "fatals"}
-    if fars_required.issubset(cols):
-        return True
-
-    # Some FARS exports use uppercase/year variants.  Require ST_CASE + FATALS
-    # plus at least one true FARS year/state field.
-    has_st_case = "st_case" in cols
-    has_fatals = "fatals" in cols
-    has_year = bool({"caseyear", "year"} & cols)
-    has_state = bool({"state", "statename"} & cols)
-    if has_st_case and has_fatals and has_year and has_state:
-        return True
-
-    return False
+    cols = {str(c).lower() for c in df.columns}
+    return ("st_case" in cols or "sourcecrashid" in cols) and ("fatals" in cols or "fatalities" in cols)
 
 
 def _apply_fars_mapping_defaults(df, mapping):
@@ -356,19 +316,6 @@ def apply_field_mapping(df, mapping):
 
     sev_col = col("severity")
     if sev_col:
-        # Keep the user-facing severity labels exactly as they appear in the
-        # mapped severity column.  Filters, legends, and color-by-severity
-        # controls should show agency labels such as "Fatal (K)" or
-        # "Evident Incapacitating (A)".  A separate normalized KABCO code is
-        # still created for calculations such as KSI, EPDO, and KABCO summaries.
-        out["DashboardSeverityLabel"] = (
-            out[sev_col]
-            .fillna("Unknown")
-            .astype(str)
-            .str.strip()
-            .replace({"": "Unknown"})
-        )
-        out["CrashSeverityLabel"] = out["DashboardSeverityLabel"]
         out["DashboardKABCO"] = out[sev_col].map(normalize_kabco_value)
     else:
         # Derive one representative severity per crash from person-count fields.
@@ -382,11 +329,8 @@ def apply_field_mapping(df, mapping):
         out.loc[b > 0, "DashboardKABCO"] = "B"
         out.loc[a > 0, "DashboardKABCO"] = "A"
         out.loc[k > 0, "DashboardKABCO"] = "K"
-        out["DashboardSeverityLabel"] = out["DashboardKABCO"]
-        out["CrashSeverityLabel"] = out["DashboardSeverityLabel"]
 
-    # Keep KABCO as a normalized calculation field.  Do not use it for the
-    # user-facing severity filter/legend when DashboardSeverityLabel exists.
+    # If a KABCO field exists, overwrite with normalized values for consistent charts.
     if "DashboardKABCO" in out.columns:
         out["KABCO"] = out["DashboardKABCO"]
 
@@ -402,8 +346,6 @@ def apply_field_mapping(df, mapping):
     out["DashboardNoInjury"] = _as_numeric_series(out, noinj_col)
     if is_fars_fatal_only_dataset(out):
         out["DashboardKABCO"] = "K"
-        out["DashboardSeverityLabel"] = "Fatal (K)"
-        out["CrashSeverityLabel"] = out["DashboardSeverityLabel"]
         out["KABCO"] = "K"
         if "DashboardFatalities" not in out.columns or pd.to_numeric(out["DashboardFatalities"], errors="coerce").fillna(0).sum() == 0:
             out["DashboardFatalities"] = 1
@@ -464,4 +406,5 @@ def render_field_mapping_ui(st, df, key_prefix="crash_field_mapping"):
         )
     st.session_state[state_key] = new_mapping
     st.session_state["crash_field_mapping"] = new_mapping
+    st.session_state["mapped_crash_id_col"] = new_mapping.get("crash_id", "")
     return new_mapping

@@ -1,5 +1,16 @@
 """Crash classification and spatial-unit creation UI."""
 
+from modules.crash_density import resolve_crash_id_col
+
+
+def _mapped_crash_id_col(df):
+    mapped_col = st.session_state.get("mapped_crash_id_col", "")
+
+    if mapped_col and df is not None and mapped_col in df.columns:
+        return mapped_col
+
+    return resolve_crash_id_col(df)
+
 
 def _filter_roads_to_final_corridors(roads, final_corridors):
     """Return only roads that intersect the final, not-dropped corridors."""
@@ -131,6 +142,7 @@ def render_classification_step(workflow_context, spatial_unit=None):
                 kabco_result = summarize_kabco(
                     assigned_crashes,
                     unit_id_col="UnitID",
+                    crash_id_col=_mapped_crash_id_col(assigned_crashes),
                 )
 
                 st.session_state["spatial_units"] = spatial_units
@@ -175,6 +187,7 @@ def render_classification_step(workflow_context, spatial_unit=None):
             kabco_result = summarize_kabco(
                 assigned_crashes,
                 unit_id_col="UnitID",
+                crash_id_col=_mapped_crash_id_col(assigned_crashes),
             )
 
             st.session_state["spatial_units"] = spatial_units
@@ -255,6 +268,7 @@ def render_classification_step(workflow_context, spatial_unit=None):
                 kabco_result = summarize_kabco(
                     assigned_crashes,
                     unit_id_col="UnitID",
+                    crash_id_col=_mapped_crash_id_col(assigned_crashes),
                 )
 
                 st.session_state["spatial_units"] = spatial_units
@@ -336,6 +350,7 @@ def render_classification_step(workflow_context, spatial_unit=None):
                 kabco_result = summarize_kabco(
                     assigned_crashes,
                     unit_id_col="UnitID",
+                    crash_id_col=_mapped_crash_id_col(assigned_crashes),
                 )
 
                 st.session_state["spatial_units"] = spatial_units

@@ -1,5 +1,7 @@
 """Step 7 sliding window risk analysis UI."""
 
+from modules.crash_density import resolve_crash_id_col
+
 from ..map_symbology import (
     add_categorical_legend,
     categorical_color_lookup,
@@ -10,7 +12,16 @@ from ..map_symbology import (
 )
 
 
-def _build_original_crash_density_layer(selected_roads, crashes_s7, segment_id_col, crash_snap_dist_ft):
+def _mapped_crash_id_col(df):
+    mapped_col = st.session_state.get("mapped_crash_id_col", "")
+
+    if mapped_col and df is not None and mapped_col in df.columns:
+        return mapped_col
+
+    return resolve_crash_id_col(df)
+
+
+def _build_original_crash_density_layer(selected_roads, crashes_s7, segment_id_col, crash_snap_dist_ft, crash_id_col=None):
     """Build crash density on the original uploaded/selected road segments."""
 
     if selected_roads is None or crashes_s7 is None:
@@ -36,12 +47,42 @@ def _build_original_crash_density_layer(selected_roads, crashes_s7, segment_id_c
         search_distance_ft=crash_snap_dist_ft
     )
 
-    crash_counts = (
-        assigned_original
-        .groupby("UnitID")
-        .size()
-        .reset_index(name="CrashCount")
+    resolved_crash_id_col = resolve_crash_id_col(
+        assigned_original,
+        crash_id_col=crash_id_col,
     )
+
+    if resolved_crash_id_col is not None:
+        count_work = assigned_original[["UnitID", resolved_crash_id_col]].copy()
+        count_work[resolved_crash_id_col] = (
+            count_work[resolved_crash_id_col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        count_work = count_work[count_work[resolved_crash_id_col] != ""]
+
+        if not count_work.empty:
+            crash_counts = (
+                count_work
+                .groupby("UnitID")[resolved_crash_id_col]
+                .nunique()
+                .reset_index(name="CrashCount")
+            )
+        else:
+            crash_counts = (
+                assigned_original
+                .groupby("UnitID")
+                .size()
+                .reset_index(name="CrashCount")
+            )
+    else:
+        crash_counts = (
+            assigned_original
+            .groupby("UnitID")
+            .size()
+            .reset_index(name="CrashCount")
+        )
 
     original_density = original_units.merge(
         crash_counts,
@@ -1170,6 +1211,16 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                 f"Crash records used: {len(crashes_s7):,}"
             )
 
+            crash_id_col_s7 = _mapped_crash_id_col(crashes_s7)
+            if crash_id_col_s7 is not None:
+                st.caption(
+                    f"Crash Count uses unique IDs from: {crash_id_col_s7}"
+                )
+            else:
+                st.caption(
+                    "Crash Count uses row count because no Crash ID field is mapped or detected."
+                )
+
             kabco_col = None
             epdo_weights = None
 
@@ -1264,14 +1315,16 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                 kabco_col=kabco_col,
                 epdo_weights=epdo_weights,
                 segment_id_col=segment_id_col_s7,
-                min_crash_count=None
+                min_crash_count=None,
+                crash_id_col=crash_id_col_s7
             )
 
             original_density = _build_original_crash_density_layer(
                 roads_for_s7,
                 crashes_s7,
                 segment_id_col_s7,
-                crash_snap_dist_ft
+                crash_snap_dist_ft,
+                crash_id_col=crash_id_col_s7
             )
 
             st.session_state["section7_results"] = results
