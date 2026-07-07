@@ -1422,22 +1422,14 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                         data=section7_excel_bytes(
                             risk_windows,
                             risk_segments_clean,
-                            risk_corridors_clean
+                            risk_corridors_clean,
+                            include_corridors=False
                         ),
                         file_name="hin_sliding_window_results.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="section7_download_excel"
                     )
 
-                    st.download_button(
-                        "HIN Corridors CSV",
-                        data=df_to_csv_bytes(
-                            corridor_table
-                        ),
-                        file_name="hin_corridors.csv",
-                        mime="text/csv",
-                        key="section7_download_corridors_csv"
-                    )
 
             if st.session_state.get("defer_sliding_window_maps", False):
                 st.session_state["section7_visualization_ready"] = True

@@ -292,13 +292,24 @@ def _render_hin_summary_visualization(st_folium, workflow_context):
         )
         summary_type = st.selectbox(
             "HIN summary statistic",
-            ["Value map", "Above average", "Above median", "Custom threshold"],
-            key="hin_summary_map_type",
+            [
+                "Value map",
+                "Above average",
+                "Above median",
+                "25th percentile",
+                "50th percentile / median",
+                "75th percentile",
+                "IQR high-outlier threshold",
+                "Custom threshold",
+            ],
+            key="hin_summary_map_type_v2",
         )
         custom_threshold = None
         if summary_type == "Custom threshold":
             values = pd.to_numeric(risk_segments_clean[metric], errors="coerce")
-            default_threshold = float(values.median()) if values.notna().any() else 0.0
+            positive_values = values[values > 0]
+            threshold_base = positive_values if not positive_values.empty else values.dropna()
+            default_threshold = float(threshold_base.median()) if not threshold_base.empty else 0.0
             custom_threshold = st.number_input(
                 "Minimum HIN value",
                 value=default_threshold,
@@ -308,14 +319,54 @@ def _render_hin_summary_visualization(st_folium, workflow_context):
 
     display_segments = risk_segments_clean.copy()
     metric_values = pd.to_numeric(display_segments[metric], errors="coerce")
+    valid_metric_values = metric_values.dropna()
+    positive_metric_values = valid_metric_values[valid_metric_values > 0]
+    threshold_base = positive_metric_values if not positive_metric_values.empty else valid_metric_values
+
     if summary_type == "Above average":
-        threshold = metric_values.mean()
+        threshold = float(threshold_base.mean()) if not threshold_base.empty else 0.0
         display_segments = display_segments[metric_values >= threshold].copy()
-        st.caption(f"Showing HIN segments/windows with {metric} >= average ({threshold:.2f}).")
+        st.caption(f"Showing HIN segments/windows with {metric} >= positive-value average ({threshold:.2f}).")
     elif summary_type == "Above median":
-        threshold = metric_values.median()
+        threshold = float(threshold_base.median()) if not threshold_base.empty else 0.0
         display_segments = display_segments[metric_values >= threshold].copy()
-        st.caption(f"Showing HIN segments/windows with {metric} >= median ({threshold:.2f}).")
+        st.caption(f"Showing HIN segments/windows with {metric} >= positive-value median ({threshold:.2f}).")
+    elif summary_type in ["25th percentile", "50th percentile / median", "75th percentile"]:
+        percentile_lookup = {
+            "25th percentile": 0.25,
+            "50th percentile / median": 0.50,
+            "75th percentile": 0.75,
+        }
+        percentile_value = percentile_lookup[summary_type]
+        threshold = float(threshold_base.quantile(percentile_value)) if not threshold_base.empty else 0.0
+        display_segments = display_segments[metric_values >= threshold].copy()
+        st.caption(
+            f"Showing HIN segments/windows with {metric} >= {summary_type} "
+            f"of positive HIN values ({threshold:.2f})."
+        )
+    elif summary_type == "IQR high-outlier threshold":
+        if not threshold_base.empty:
+            q1 = float(threshold_base.quantile(0.25))
+            q3 = float(threshold_base.quantile(0.75))
+            iqr = q3 - q1
+            threshold = q3 + 1.5 * iqr
+            display_segments = display_segments[metric_values >= threshold].copy()
+            if display_segments.empty:
+                threshold = q3
+                display_segments = risk_segments_clean[metric_values >= threshold].copy()
+                st.caption(
+                    f"IQR high-outlier threshold selected no segments/windows, so the map is using Q3 instead. "
+                    f"Showing {metric} >= Q3 ({threshold:.2f})."
+                )
+            else:
+                st.caption(
+                    f"Showing HIN segments/windows with {metric} >= IQR high-outlier threshold "
+                    f"Q3 + 1.5×IQR ({threshold:.2f})."
+                )
+        else:
+            threshold = 0.0
+            display_segments = display_segments[metric_values >= threshold].copy()
+            st.caption(f"No valid {metric} values were available for IQR; showing {metric} >= 0.00.")
     elif summary_type == "Custom threshold":
         threshold = float(custom_threshold if custom_threshold is not None else 0.0)
         display_segments = display_segments[metric_values >= threshold].copy()

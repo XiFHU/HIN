@@ -15,6 +15,8 @@ def section7_clean_risk_segments(
     keep_cols = [
         "SegID",
         route_col,
+        "Route",
+        "RouteName_Calc",
         "FromMile",
         "ToMile",
         "Crash_Count",
@@ -40,6 +42,8 @@ def section7_clean_risk_corridors(
     keep_cols = [
         "CorridorID",
         route_col,
+        "Route",
+        "RouteName_Calc",
         "FromMile",
         "ToMile",
         "Segment_Count",
@@ -127,6 +131,41 @@ def clean_linestring(geom):
 
     return None
 
+
+
+def add_standard_route_name_columns(gdf, route_col):
+    """Add stable route-name aliases for tables, dashboard charts, and exports.
+
+    The analysis method may use a source-specific route column such as FULLNAME
+    for TIGER, name/Name for OSM, or a user-selected custom field.  Downstream
+    dashboard and export code needs a consistent readable route field, so keep
+    the original route column and also add Route / RouteName_Calc aliases.
+    This does not change geometry, scoring, thresholds, or crash assignment.
+    """
+
+    if gdf is None:
+        return gdf
+
+    out = gdf.copy()
+
+    if route_col is not None and route_col in out.columns:
+        route_values = (
+            out[route_col]
+            .fillna("Unknown route")
+            .astype(str)
+            .str.strip()
+        )
+        route_values = route_values.where(
+            route_values != "",
+            "Unknown route"
+        )
+
+        if "Route" not in out.columns:
+            out["Route"] = route_values
+        if "RouteName_Calc" not in out.columns:
+            out["RouteName_Calc"] = route_values
+
+    return out
 
 
 def prepare_unique_crash_id_column(crashes_df, crash_id_col=None):
@@ -288,6 +327,8 @@ def create_equal_length_segments(
         return gpd.GeoDataFrame(
             columns=[
                 route_col,
+                "Route",
+                "RouteName_Calc",
                 "SegID",
                 "Seg_Start_M",
                 "Seg_End_M",
@@ -299,10 +340,13 @@ def create_equal_length_segments(
             crs=roads_proj.crs
         )
 
-    return gpd.GeoDataFrame(
-        all_rows,
-        geometry="geometry",
-        crs=roads_proj.crs
+    return add_standard_route_name_columns(
+        gpd.GeoDataFrame(
+            all_rows,
+            geometry="geometry",
+            crs=roads_proj.crs
+        ),
+        route_col
     )
 
 
@@ -346,7 +390,10 @@ def prepare_uploaded_segments(
     segs["Seg_Start_M"] = np.nan
     segs["Seg_End_M"] = np.nan
 
-    return segs
+    return add_standard_route_name_columns(
+        segs,
+        route_col
+    )
 
 
 def create_route_lines(
@@ -376,10 +423,13 @@ def create_route_lines(
             }
         )
 
-    return gpd.GeoDataFrame(
-        route_rows,
-        geometry="geometry",
-        crs=base_segments.crs
+    return add_standard_route_name_columns(
+        gpd.GeoDataFrame(
+            route_rows,
+            geometry="geometry",
+            crs=base_segments.crs
+        ),
+        route_col
     )
 
 
@@ -433,7 +483,10 @@ def assign_crashes_to_routes(
         axis=1
     )
 
-    return joined
+    return add_standard_route_name_columns(
+        joined,
+        route_col
+    )
 
 
 def apply_epdo(
@@ -553,10 +606,13 @@ def create_sliding_windows(
             start_m += step_len_m
             win_id += 1
 
-    return gpd.GeoDataFrame(
-        window_rows,
-        geometry="geometry",
-        crs=route_lines.crs
+    return add_standard_route_name_columns(
+        gpd.GeoDataFrame(
+            window_rows,
+            geometry="geometry",
+            crs=route_lines.crs
+        ),
+        route_col
     )
 
 
@@ -580,6 +636,10 @@ def score_segments(
         segs["Risk_Score"] = 0
         segs["Risk_Flag"] = False
         segs["Risk_Class"] = "Not Risky"
+        segs = add_standard_route_name_columns(
+            segs,
+            route_col
+        )
 
         return segs, positive_windows, 0
 
@@ -689,6 +749,15 @@ def score_segments(
         "Not Risky"
     )
 
+    segs = add_standard_route_name_columns(
+        segs,
+        route_col
+    )
+    risky_windows = add_standard_route_name_columns(
+        risky_windows,
+        route_col
+    )
+
     return segs, risky_windows, threshold
 
 def build_risk_corridors(
@@ -705,6 +774,8 @@ def build_risk_corridors(
         return gpd.GeoDataFrame(
             columns=[
                 route_col,
+                "Route",
+                "RouteName_Calc",
                 "CorridorID",
                 "Segment_Count",
                 "Max_HIN_Index",
@@ -751,10 +822,13 @@ def build_risk_corridors(
                 }
             )
 
-    return gpd.GeoDataFrame(
-        corridor_rows,
-        geometry="geometry",
-        crs=risk_segments.crs
+    return add_standard_route_name_columns(
+        gpd.GeoDataFrame(
+            corridor_rows,
+            geometry="geometry",
+            crs=risk_segments.crs
+        ),
+        route_col
     )
 
 
@@ -1169,7 +1243,8 @@ def df_to_csv_bytes(df):
 def section7_excel_bytes(
     risk_windows,
     risk_segments,
-    risk_corridors
+    risk_corridors=None,
+    include_corridors=True
 ):
     output = io.BytesIO()
 
@@ -1196,14 +1271,15 @@ def section7_excel_bytes(
             index=False
         )
 
-        risk_corridors.drop(
-            columns="geometry",
-            errors="ignore"
-        ).to_excel(
-            writer,
-            sheet_name="Risk_Corridors",
-            index=False
-        )
+        if include_corridors and risk_corridors is not None:
+            risk_corridors.drop(
+                columns="geometry",
+                errors="ignore"
+            ).to_excel(
+                writer,
+                sheet_name="Risk_Corridors",
+                index=False
+            )
 
     output.seek(0)
 

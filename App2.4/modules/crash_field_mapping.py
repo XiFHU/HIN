@@ -158,8 +158,11 @@ def is_fars_fatal_only_dataset(df):
                 return True
         except Exception:
             pass
-    cols = {str(c).lower() for c in df.columns}
-    return ("st_case" in cols or "sourcecrashid" in cols) and ("fatals" in cols or "fatalities" in cols)
+    # Do not infer FARS only from generic ID/fatality columns such as
+    # SourceCrashID + Fatalities. Local crash datasets often have the same
+    # fields and may still contain nonfatal crashes. The FARS parser writes
+    # CrashSource = FARS, so that explicit flag is the reliable test.
+    return False
 
 
 def _apply_fars_mapping_defaults(df, mapping):
@@ -349,10 +352,18 @@ def apply_field_mapping(df, mapping):
         out["KABCO"] = "K"
         if "DashboardFatalities" not in out.columns or pd.to_numeric(out["DashboardFatalities"], errors="coerce").fillna(0).sum() == 0:
             out["DashboardFatalities"] = 1
-        out["DashboardSeriousInjuries"] = 0
-        out["DashboardMinorInjuries"] = 0
-        out["DashboardPossibleInjuries"] = 0
-        out["DashboardNoInjury"] = 0
+        # FARS Accident is fatal-only, but do not overwrite user-mapped
+        # injury person-count fields if the user selected them in field
+        # mapping. Only set canonical injury fields to zero when no source
+        # column was mapped for that injury level.
+        if not serious_col:
+            out["DashboardSeriousInjuries"] = 0
+        if not minor_col:
+            out["DashboardMinorInjuries"] = 0
+        if not possible_col:
+            out["DashboardPossibleInjuries"] = 0
+        if not noinj_col:
+            out["DashboardNoInjury"] = 0
         out["DashboardFatalOnlySource"] = True
 
     out["DashboardFatalCrashFlag"] = (out["DashboardFatalities"] > 0) | (out.get("DashboardKABCO", "") == "K")

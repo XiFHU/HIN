@@ -1,5 +1,7 @@
 # modules/corridors.py
 
+import re
+
 import geopandas as gpd
 import pandas as pd
 
@@ -43,6 +45,58 @@ def normalize_road_name(name):
 
     return name
 
+
+
+def _is_auto_generated_osm_route_name(name):
+    """Return True for synthetic OSM route labels created for unnamed roads.
+
+    OSM streets sometimes do not have a real name. Earlier app logic generated
+    placeholder route names such as ``OSM trunk_link 37743697`` or
+    ``OSM_TRUNK_LINK_37743697`` so unnamed road pieces could still be processed.
+    Those placeholders are useful internally, but they should not qualify as
+    final named corridors.
+    """
+
+    if name is None:
+        return False
+
+    text = str(name).strip().upper()
+
+    if text in ["", "NONE", "NAN", "NULL"]:
+        return False
+
+    normalized = re.sub(r"[\s\-]+", "_", text)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+
+    if normalized.startswith("OSM_UNNAMED"):
+        return True
+
+    if not normalized.startswith("OSM_"):
+        return False
+
+    # Examples matched:
+    # OSM_TRUNK_LINK_37743697
+    # OSM_RESIDENTIAL_625957316
+    # OSM_PRIMARY_12345
+    return bool(re.match(r"^OSM_[A-Z0-9]+(?:_[A-Z0-9]+)*_\d+$", normalized))
+
+
+def _is_valid_named_corridor_route(name):
+    """Return True when a route label is suitable for final corridor output."""
+
+    if name is None:
+        return False
+
+    text = str(name).strip()
+    upper = text.upper()
+
+    if upper in ["", "NONE", "NAN", "NULL"]:
+        return False
+
+    if _is_auto_generated_osm_route_name(text):
+        return False
+
+    return True
 
 def _empty_corridors():
     return gpd.GeoDataFrame(
@@ -105,6 +159,10 @@ def assign_signal_route_from_roads(
     ].copy()
 
     roads_m = roads_m[
+        roads_m[route_col].apply(_is_valid_named_corridor_route)
+    ].copy()
+
+    roads_m = roads_m[
         roads_m.geometry.geom_type.isin(
             ["LineString", "MultiLineString"]
         )
@@ -151,6 +209,10 @@ def assign_signal_route_from_roads(
         joined[route_col].notna()
     ].copy()
 
+    joined = joined[
+        joined[route_col].apply(_is_valid_named_corridor_route)
+    ].copy()
+
     joined["geometry"] = joined["__signal_geometry"]
 
     joined = gpd.GeoDataFrame(
@@ -175,6 +237,8 @@ def assign_signal_route_from_roads(
         & (joined["Route_Normalized"] != "")
         & (joined["Route_Normalized"].str.upper() != "NONE")
         & (joined["Route_Normalized"].str.upper() != "NAN")
+        & joined["Route"].apply(_is_valid_named_corridor_route)
+        & joined["Route_Normalized"].apply(_is_valid_named_corridor_route)
     ].copy()
 
     joined["MatchedRoadName"] = joined["Route"]
@@ -387,6 +451,10 @@ def build_corridors(
     ].copy()
 
     roads_m = roads_m[
+        roads_m[route_col].apply(_is_valid_named_corridor_route)
+    ].copy()
+
+    roads_m = roads_m[
         roads_m.geometry.geom_type.isin(
             ["LineString", "MultiLineString"]
         )
@@ -427,6 +495,8 @@ def build_corridors(
             & (signals_m["Route_Normalized"] != "")
             & (signals_m["Route_Normalized"].str.upper() != "NONE")
             & (signals_m["Route_Normalized"].str.upper() != "NAN")
+            & signals_m["Route"].apply(_is_valid_named_corridor_route)
+            & signals_m["Route_Normalized"].apply(_is_valid_named_corridor_route)
         ].copy()
 
         signals_m = _deduplicate_signal_route_rows(signals_m)
@@ -472,6 +542,24 @@ def build_corridors(
             if "Route" in group.columns and not group["Route"].dropna().empty
             else str(route_key)
         )
+
+        if (
+            not _is_valid_named_corridor_route(route_display)
+            or not _is_valid_named_corridor_route(route_normalized)
+        ):
+            debug_rows.append(
+                {
+                    "Route": route_display,
+                    "Route_Normalized": route_normalized,
+                    "SignalCnt": _unique_signal_count(group),
+                    "SignalRowCnt": len(group),
+                    "ExactMatchRoadCnt": 0,
+                    "RoadCnt": 0,
+                    "Method": "FAILED - unnamed OSM placeholder route excluded"
+                }
+            )
+
+            continue
 
         exact_match_roads = roads_m[
             roads_m["_route_clean"] == route_normalized

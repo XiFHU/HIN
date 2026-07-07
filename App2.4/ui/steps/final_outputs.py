@@ -149,7 +149,7 @@ def _render_hin_downloads(st):
     with c3:
         st.download_button(
             "Download HIN results Excel",
-            data=section7_excel_bytes(risk_windows, risk_segments, risk_corridors),
+            data=section7_excel_bytes(risk_windows, risk_segments, risk_corridors, include_corridors=False),
             file_name="hin_sliding_window_results.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="final_download_hin_excel",

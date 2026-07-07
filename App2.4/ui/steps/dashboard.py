@@ -504,18 +504,22 @@ def _style(st):
     st.markdown(
         """
         <style>
-        /* Dashboard mode uses one internal scroll area only.
-           Without this, Streamlit shows both the browser/page scrollbar and
-           the tab-panel scrollbar. */
+        /* Dashboard and Crash insights need normal page scrolling.
+           The workflow map shell uses fixed-height panes, but dashboard tabs
+           contain long charts/tables. Keep the dashboard on the browser/page
+           scrollbar instead of a fragile internal tab-panel scrollbar. */
         html, body, .stApp, [data-testid="stAppViewContainer"],
         [data-testid="stMain"], section[data-testid="stMain"],
+        [data-testid="stMainBlockContainer"],
+        [data-testid="stAppViewBlockContainer"],
         .main, .block-container {
-            height: 100vh !important;
-            max-height: 100vh !important;
-            overflow-y: hidden !important;
+            height: auto !important;
+            max-height: none !important;
+            min-height: 100vh !important;
+            overflow-y: auto !important;
             overflow-x: hidden !important;
         }
-        .block-container { padding-top: .65rem; padding-bottom: .75rem !important; max-width: 1900px; }
+        .block-container { padding-top: .65rem; padding-bottom: 6rem !important; max-width: 1900px; }
         [data-testid="stVerticalBlock"] { overflow: visible !important; }
         .dashboard-scroll-note { color:#64748b; font-size:.86rem; margin-top:-.2rem; margin-bottom:.4rem; }
         .dashboard-hero {
@@ -563,12 +567,14 @@ def _style(st):
             margin-bottom: .75rem;
             background: white;
         }
-        .stTabs [data-baseweb="tab-panel"] {
-            max-height: calc(100vh - 135px) !important;
-            overflow-y: auto !important;
-            overflow-x: hidden !important;
-            padding-right: 12px !important;
-            padding-bottom: 12rem !important;
+        .stTabs [data-baseweb="tab-panel"],
+        .stTabs [role="tabpanel"],
+        div[data-baseweb="tab-panel"] {
+            max-height: none !important;
+            overflow-y: visible !important;
+            overflow-x: visible !important;
+            padding-right: 0 !important;
+            padding-bottom: 2rem !important;
         }
         </style>
         """,
@@ -1886,6 +1892,79 @@ def _normal_col(df, candidates):
         cl = str(c).lower()
         if any(cand.lower() in cl for cand in candidates):
             return c
+    return None
+
+
+def _is_bad_route_candidate(name):
+    """Return True for fields that should not be used as route names.
+
+    Dashboard charts should group by road/route name.  Very short severity
+    fields such as B, C, O or injury-count fields can accidentally match
+    substring searches and create y-axis labels such as 1B / 2B.
+    """
+    low = str(name).strip().lower()
+    compact = low.replace("_", "").replace(" ", "")
+    bad_exact = {
+        "k", "a", "b", "c", "o", "kabco", "severity", "dashboardkabco",
+        "fatalities", "fatals", "seriousinjuries", "minorinjuries",
+        "possibleinjuries", "noinjury", "dashboardfatalities",
+        "dashboardseriousinjuries", "dashboardminorinjuries",
+        "dashboardpossibleinjuries", "dashboardnoinjury",
+    }
+    if compact in bad_exact:
+        return True
+    bad_words = [
+        "injur", "fatal", "severity", "kabco", "crashcount", "crash_count",
+        "count", "score", "index", "density", "mile", "length", "year",
+    ]
+    return any(w in low for w in bad_words)
+
+
+def _dashboard_route_col(df):
+    """Find a true route/road-name column for dashboard charts.
+
+    This is stricter than _normal_col because _normal_col allows substring
+    matching.  A candidate such as B can otherwise be selected as a route
+    column because route-like fields are missing from a result table.
+    """
+    if df is None or not hasattr(df, "columns"):
+        return None
+
+    exact_candidates = [
+        "Route", "FULLNAME", "RoadName", "Road_Name", "RouteName",
+        "RouteName_Calc", "CorridorRoute", "Corridor_Route", "StreetName",
+        "Street_Name", "Name", "NAME", "DisplayName", "Road", "FacilityName",
+    ]
+    norm_map = {str(c).lower().replace("_", "").replace(" ", ""): c for c in df.columns}
+    for cand in exact_candidates:
+        key = cand.lower().replace("_", "").replace(" ", "")
+        col = norm_map.get(key)
+        if col is not None and not _is_bad_route_candidate(col):
+            try:
+                vals = df[col].dropna()
+                if not vals.empty and not pd.to_numeric(vals, errors="coerce").notna().all():
+                    return col
+            except Exception:
+                return col
+
+    # Controlled fallback: require route/road/street/name words and exclude
+    # numeric/severity fields.
+    for col in df.columns:
+        low = str(col).lower()
+        if _is_bad_route_candidate(col):
+            continue
+        if not any(w in low for w in ["route", "road", "street", "corridor", "fullname", "facility", "name"]):
+            continue
+        try:
+            vals = df[col].dropna()
+            if vals.empty:
+                continue
+            if pd.to_numeric(vals, errors="coerce").notna().mean() > 0.8:
+                continue
+        except Exception:
+            pass
+        return col
+
     return None
 
 
@@ -4491,12 +4570,15 @@ def _format_kpi_value(value):
 def _summary_kpi_values(crashes):
     """Crash/person summary using mapped/canonical severity fields.
 
-    For FARS Accident data, rows are fatal crashes only, so total crashes and
-    fatal crashes are the same concept. Serious-injury metrics are not available
-    from the fatal-only Accident table and are shown as N/A.
+    Total crashes, fatal crashes, and serious-injury crashes count unique
+    crash/case IDs when an ID field exists. Fatalities and serious injuries
+    sum the person-count fields selected in Crash field mapping.
+
+    If the dataset is explicitly marked as FARS fatal-only, serious-injury
+    metrics are shown as N/A only when no serious-injury column was mapped.
     """
     vals = {
-        "Total crashes": int(len(crashes)) if crashes is not None else 0,
+        "Total crashes": 0,
         "Fatal crashes": 0,
         "Fatalities": 0,
         "Serious injury crashes": 0,
@@ -4505,54 +4587,74 @@ def _summary_kpi_values(crashes):
     if crashes is None or getattr(crashes, "empty", True):
         return vals
 
-    if _is_fars_fatal_only_dataset(crashes):
-        total = _unique_crash_count(crashes, pd.Series([True] * len(crashes), index=crashes.index)) if "_unique_crash_count" in globals() else int(len(crashes))
-        fatal_col = "DashboardFatalities" if "DashboardFatalities" in crashes.columns else None
-        if not fatal_col:
-            sev_cols = _severity_count_columns(crashes)
-            fatal_col = sev_cols.get("K")
-        if fatal_col and fatal_col in crashes.columns:
-            fatalities = int(pd.to_numeric(crashes[fatal_col], errors="coerce").fillna(1).sum())
-        else:
-            fatalities = int(total)
-        return {
-            "Total crashes": int(total),
-            "Fatal crashes": int(total),
-            "Fatalities": fatalities,
-            "Serious injury crashes": "N/A",
-            "Serious injuries": "N/A",
-        }
+    total = _unique_crash_count(crashes) if "_unique_crash_count" in globals() else int(len(crashes))
+    vals["Total crashes"] = int(total)
 
     sev_cols = _severity_count_columns(crashes)
-    # Use person-count columns only when at least one mapped/canonical person
-    # count has positive values.  For single KABCO-text datasets, the canonical
-    # Dashboard* count columns may exist but be all zero.
-    positive_person_counts = False
-    for col in sev_cols.values():
-        if col in crashes.columns and pd.to_numeric(crashes[col], errors="coerce").fillna(0).sum() > 0:
-            positive_person_counts = True
-            break
+    mapped_fatal_col = _mapped_col(crashes, "fatalities")
+    mapped_serious_col = _mapped_col(crashes, "serious_injuries")
 
-    if positive_person_counts and sev_cols.get("K"):
-        fatal_vals = pd.to_numeric(crashes[sev_cols["K"]], errors="coerce").fillna(0)
+    fatal_col = mapped_fatal_col or sev_cols.get("K")
+    serious_col = mapped_serious_col or sev_cols.get("A")
+
+    fatal_vals = None
+    if fatal_col and fatal_col in crashes.columns:
+        fatal_vals = pd.to_numeric(crashes[fatal_col], errors="coerce").fillna(0)
         vals["Fatalities"] = int(fatal_vals.sum())
-        vals["Fatal crashes"] = _unique_crash_count(crashes, fatal_vals > 0) if "_unique_crash_count" in globals() else int((fatal_vals > 0).sum())
-    if positive_person_counts and sev_cols.get("A"):
-        serious_vals = pd.to_numeric(crashes[sev_cols["A"]], errors="coerce").fillna(0)
+        vals["Fatal crashes"] = (
+            _unique_crash_count(crashes, fatal_vals > 0)
+            if "_unique_crash_count" in globals()
+            else int((fatal_vals > 0).sum())
+        )
+
+    serious_vals = None
+    if serious_col and serious_col in crashes.columns:
+        serious_vals = pd.to_numeric(crashes[serious_col], errors="coerce").fillna(0)
         vals["Serious injuries"] = int(serious_vals.sum())
-        vals["Serious injury crashes"] = _unique_crash_count(crashes, serious_vals > 0) if "_unique_crash_count" in globals() else int((serious_vals > 0).sum())
+        vals["Serious injury crashes"] = (
+            _unique_crash_count(crashes, serious_vals > 0)
+            if "_unique_crash_count" in globals()
+            else int((serious_vals > 0).sum())
+        )
 
     kabco_col = _kabco_col(crashes)
     if kabco_col and kabco_col in crashes.columns:
         k = crashes[kabco_col].map(normalize_kabco_value)
         if vals["Fatal crashes"] == 0:
-            vals["Fatal crashes"] = _unique_crash_count(crashes, k == "K") if "_unique_crash_count" in globals() else int((k == "K").sum())
+            vals["Fatal crashes"] = (
+                _unique_crash_count(crashes, k == "K")
+                if "_unique_crash_count" in globals()
+                else int((k == "K").sum())
+            )
         if vals["Serious injury crashes"] == 0:
-            vals["Serious injury crashes"] = _unique_crash_count(crashes, k == "A") if "_unique_crash_count" in globals() else int((k == "A").sum())
-        if vals["Fatalities"] == 0:
+            vals["Serious injury crashes"] = (
+                _unique_crash_count(crashes, k == "A")
+                if "_unique_crash_count" in globals()
+                else int((k == "A").sum())
+            )
+        if vals["Fatalities"] == 0 and not mapped_fatal_col:
             vals["Fatalities"] = vals["Fatal crashes"]
-        if vals["Serious injuries"] == 0:
+        if vals["Serious injuries"] == 0 and not mapped_serious_col:
             vals["Serious injuries"] = vals["Serious injury crashes"]
+
+    if _is_fars_fatal_only_dataset(crashes):
+        # FARS Accident rows are fatal crashes. However, if a Fatalities field
+        # is mapped, use that field for both fatality persons and the fatal
+        # crash flag instead of blindly making Fatal crashes = Total crashes.
+        if not fatal_col:
+            vals["Fatal crashes"] = int(total)
+            vals["Fatalities"] = int(total)
+        elif vals["Fatal crashes"] == 0 and vals["Fatalities"] == 0:
+            vals["Fatal crashes"] = int(total)
+            vals["Fatalities"] = int(total)
+
+        # Serious-injury fields are not part of the FARS Accident fatal-only
+        # table. Show N/A only when the user did not map/select a serious-
+        # injury count column. If they selected one, show its numeric result.
+        if not mapped_serious_col:
+            vals["Serious injury crashes"] = "N/A"
+            vals["Serious injuries"] = "N/A"
+
     return vals
 
 
@@ -5258,7 +5360,7 @@ def _hin_distribution_figures(hin):
     fig.update_layout(xaxis_title="HIN priority index", yaxis_title="Segment/window count")
     figures.append(("HIN index distribution", _polish_figure(fig), work[[metric]].copy()))
 
-    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"])
+    route_col = _dashboard_route_col(work)
     length_col = _dashboard_length_col(work)
     if route_col:
         route_work = work.copy()
@@ -5306,7 +5408,7 @@ def _hin_ka_bubble_figure(hin):
     work["KA_Crashes"] = pd.to_numeric(_hin_ka_series(work), errors="coerce").fillna(0)
     if work["KA_Crashes"].sum() <= 0:
         return None, pd.DataFrame()
-    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"])
+    route_col = _dashboard_route_col(work)
     id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
     if id_col is None:
         id_col = "DashboardUnitID"
@@ -5450,7 +5552,7 @@ def _render_hin_network_summary(st, hin, crashes):
         preview_cols = []
         for c in [
             _normal_col(selected_display, ["RiskSegmentID", "WindowID", "SegmentID", "UnitID", "CorridorID"]),
-            _normal_col(selected_display, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"]),
+            _dashboard_route_col(selected_display),
             _dashboard_length_col(selected_display),
             _crash_count_col(selected_display),
             "KA_Crashes",
@@ -5483,7 +5585,7 @@ def _hin_table_for_display(hin, metric, top_n=20):
     work = work.sort_values(metric, ascending=False).head(top_n).reset_index(drop=True)
 
     id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
-    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "CorridorRoute", "RouteName_Calc", "Name"])
+    route_col = _dashboard_route_col(work)
     length_col = _dashboard_length_col(work)
     from_col = _normal_col(work, ["FromMile", "From_Mile", "from_mile", "BeginMile", "StartMile", "WindowFromMile"])
     to_col = _normal_col(work, ["ToMile", "To_Mile", "to_mile", "EndMile", "WindowToMile"])
@@ -5813,7 +5915,7 @@ def _hin_distribution_figures(hin):
     fig.update_layout(xaxis_title="Segment/window percentile", yaxis_title="HIN priority index")
     figures.append(("HIN index distribution curve", _polish_figure(fig), dist))
 
-    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"])
+    route_col = _dashboard_route_col(work)
     length_col = _dashboard_length_col(work)
     if route_col:
         route_work = work.copy()
@@ -5831,7 +5933,7 @@ def _hin_distribution_figures(hin):
         route_summary = route_summary.sort_values("Average_HIN", ascending=False).head(15)
         if not route_summary.empty:
             plot_df = route_summary.copy()
-            plot_df["Average_HIN_Left"] = -pd.to_numeric(plot_df["Average_HIN"], errors="coerce").fillna(0)
+            plot_df["Average_HIN_Left"] = pd.to_numeric(plot_df["Average_HIN"], errors="coerce").fillna(0)
             plot_df["Median_HIN_Right"] = pd.to_numeric(plot_df["Median_HIN"], errors="coerce").fillna(0)
             plot_df = plot_df.sort_values("Average_HIN", ascending=True)
             fig = px.bar(
@@ -5839,7 +5941,7 @@ def _hin_distribution_figures(hin):
                 y=route_col,
                 x=["Average_HIN_Left", "Median_HIN_Right"],
                 orientation="h",
-                barmode="relative",
+                barmode="group",
                 hover_data=[c for c in ["Average_HIN", "Median_HIN", "Max_HIN", "Segment_Count", "Miles"] if c in plot_df.columns],
                 title="Average and median HIN index by route",
             )
@@ -5852,13 +5954,13 @@ def _hin_distribution_figures(hin):
                     trace.text = [f"{v:.1f}" for v in trace.x]
                 trace.textposition = "inside"
             max_val = max(float(plot_df["Average_HIN"].max() or 0), float(plot_df["Median_HIN"].max() or 0), 1.0)
-            tick_vals = [-max_val, -max_val / 2, 0, max_val / 2, max_val]
+            tick_vals = [0, max_val / 2, max_val]
             fig.update_layout(
                 yaxis_title="Route",
                 xaxis_title="HIN priority index",
                 legend_title="Statistic",
                 bargap=0.25,
-                xaxis=dict(tickmode="array", tickvals=tick_vals, ticktext=[f"{abs(v):.0f}" for v in tick_vals]),
+                xaxis=dict(tickmode="array", tickvals=tick_vals, ticktext=[f"{v:.0f}" for v in tick_vals], range=[0, max_val * 1.05]),
             )
             figures.append(("Average and median HIN index by route", _polish_figure(fig), route_summary))
     return figures
@@ -5875,7 +5977,7 @@ def _hin_ka_bubble_figure(hin):
     work["KSI_Crashes_Dashboard"] = pd.to_numeric(_hin_ka_series(work), errors="coerce").fillna(0)
     if work["KSI_Crashes_Dashboard"].sum() <= 0:
         return None, pd.DataFrame()
-    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"])
+    route_col = _dashboard_route_col(work)
     id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
     if id_col is None:
         id_col = "DashboardUnitID"
@@ -5981,7 +6083,7 @@ def _render_hin_network_summary(st, hin, crashes):
         preview_cols = []
         for c in [
             _normal_col(selected_display, ["RiskSegmentID", "WindowID", "SegmentID", "UnitID", "CorridorID"]),
-            _normal_col(selected_display, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"]),
+            _dashboard_route_col(selected_display),
             _dashboard_length_col(selected_display), _crash_count_col(selected_display),
             "KSI_Crashes_Dashboard", metric, "Dashboard_Analysis_Years", "Crash_per_Mile_per_Year", "KSI_per_Mile_per_Year",
         ]:
@@ -6009,7 +6111,7 @@ def _hin_table_for_display(hin, metric, top_n=20):
     work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
     work = work.sort_values(metric, ascending=False).head(top_n).reset_index(drop=True)
     id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
-    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "CorridorRoute", "RouteName_Calc", "Name"])
+    route_col = _dashboard_route_col(work)
     length_col = _dashboard_length_col(work)
     from_col = _normal_col(work, ["FromMile", "From_Mile", "from_mile", "BeginMile", "StartMile", "WindowFromMile"])
     to_col = _normal_col(work, ["ToMile", "To_Mile", "to_mile", "EndMile", "WindowToMile"])
@@ -6850,7 +6952,7 @@ def _hin_distribution_figures(hin):
     fig.update_layout(xaxis_title="HIN priority index", yaxis_title="Segment/window count")
     figures.append(("HIN index distribution by score range", _polish_figure(fig), dist))
 
-    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"])
+    route_col = _dashboard_route_col(work)
     length_col = _dashboard_length_col(work)
     if route_col:
         route_work = work.copy()
@@ -6868,7 +6970,7 @@ def _hin_distribution_figures(hin):
         route_summary = route_summary.sort_values("Average_HIN", ascending=False).head(15)
         if not route_summary.empty:
             plot_df = route_summary.copy()
-            plot_df["Average_HIN_Left"] = -pd.to_numeric(plot_df["Average_HIN"], errors="coerce").fillna(0)
+            plot_df["Average_HIN_Left"] = pd.to_numeric(plot_df["Average_HIN"], errors="coerce").fillna(0)
             plot_df["Median_HIN_Right"] = pd.to_numeric(plot_df["Median_HIN"], errors="coerce").fillna(0)
             plot_df = plot_df.sort_values("Average_HIN", ascending=True)
             fig = px.bar(
@@ -6876,7 +6978,7 @@ def _hin_distribution_figures(hin):
                 y=route_col,
                 x=["Average_HIN_Left", "Median_HIN_Right"],
                 orientation="h",
-                barmode="relative",
+                barmode="group",
                 hover_data=[c for c in ["Average_HIN", "Median_HIN", "Max_HIN", "Segment_Count", "Miles"] if c in plot_df.columns],
                 title="Average and median HIN index by route",
             )
@@ -6889,13 +6991,13 @@ def _hin_distribution_figures(hin):
                     trace.text = [f"{v:.1f}" for v in trace.x]
                 trace.textposition = "inside"
             max_val = max(float(plot_df["Average_HIN"].max() or 0), float(plot_df["Median_HIN"].max() or 0), 1.0)
-            tick_vals = [-max_val, -max_val / 2, 0, max_val / 2, max_val]
+            tick_vals = [0, max_val / 2, max_val]
             fig.update_layout(
                 yaxis_title="Route",
                 xaxis_title="HIN priority index",
                 legend_title="Statistic",
                 bargap=0.25,
-                xaxis=dict(tickmode="array", tickvals=tick_vals, ticktext=[f"{abs(v):.0f}" for v in tick_vals]),
+                xaxis=dict(tickmode="array", tickvals=tick_vals, ticktext=[f"{v:.0f}" for v in tick_vals], range=[0, max_val * 1.05]),
             )
             figures.append(("Average and median HIN index by route", _polish_figure(fig), route_summary))
     return figures
@@ -7053,7 +7155,7 @@ def _render_hin_network_summary(st, hin, crashes):
         preview_cols = []
         for c in [
             _normal_col(selected_display, ["RiskSegmentID", "WindowID", "SegmentID", "UnitID", "CorridorID"]),
-            _normal_col(selected_display, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"]),
+            _dashboard_route_col(selected_display),
             _dashboard_length_col(selected_display), _crash_count_col(selected_display),
             "KSI_Crashes_Dashboard", metric, "Dashboard_Analysis_Years", "Crash_per_Mile_per_Year", "KSI_per_Mile_per_Year",
         ]:
@@ -7084,7 +7186,7 @@ def _hin_table_for_display(hin, metric, top_n=20):
     work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
     work = work.sort_values(metric, ascending=False).head(top_n).reset_index(drop=True)
     id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
-    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "CorridorRoute", "RouteName_Calc", "Name"])
+    route_col = _dashboard_route_col(work)
     length_col = _dashboard_length_col(work)
     from_col = _normal_col(work, ["FromMile", "From_Mile", "from_mile", "BeginMile", "StartMile", "WindowFromMile"])
     to_col = _normal_col(work, ["ToMile", "To_Mile", "to_mile", "EndMile", "WindowToMile"])
@@ -7200,24 +7302,47 @@ def _render_crash_ksi_mapping_controls(st, crashes):
 
 
 def _crash_level_ksi_series(crashes):
-    """Return one 0/1 KSI flag per crash row, preferring KABCO/severity.
+    """Return one 0/1 KSI flag per crash row.
 
-    KSI means crashes with severity K or A. We intentionally do not sum generic
-    injury-count columns such as serious-injury persons, because the dashboard
-    card needs KSI crash count, not number of injured people.
+    KSI means a crash is fatal or serious-injury (K or A).  The preferred
+    source is the mapped/canonical crash-level severity field.  If the dataset
+    does not have a single KABCO field, use the mapped Fatalities and Serious
+    Injuries person-count fields as crash-level flags: any value greater than
+    zero means that crash is K or A.  The returned value is still 0/1 per crash
+    row, not a sum of injured people.
     """
     if crashes is None or getattr(crashes, "empty", True):
         return pd.Series(dtype="float64")
 
     work = crashes.copy()
 
-    # Prefer a KABCO/severity column. This matches the crash summary KPI logic.
     kabco = _kabco_col(work)
     if kabco and kabco in work.columns:
         vals = work[kabco].map(normalize_kabco_value).astype(str).str.upper()
-        return vals.isin(["K", "A"]).astype(int)
+        if vals.isin(["K", "A"]).any():
+            return vals.isin(["K", "A"]).astype(int)
 
-    # Fallback only for explicit per-crash K/A indicator columns, not injury totals.
+    fatal_col = _mapped_dashboard_col(
+        work,
+        "fatalities",
+        ["DashboardFatalities", "Fatalities", "FATALITIES", "Fatals", "FATALS", "Fatal", "K"],
+    )
+    serious_col = _mapped_dashboard_col(
+        work,
+        "serious_injuries",
+        ["DashboardSeriousInjuries", "SeriousInjuries", "Serious_Injuries", "Level_A_Injuries", "A_Injuries", "A"],
+    )
+
+    flags = pd.Series([0] * len(work), index=work.index, dtype="int64")
+    if fatal_col and fatal_col in work.columns:
+        fatal_vals = pd.to_numeric(work[fatal_col], errors="coerce").fillna(0)
+        flags = flags | (fatal_vals > 0).astype(int)
+    if serious_col and serious_col in work.columns:
+        serious_vals = pd.to_numeric(work[serious_col], errors="coerce").fillna(0)
+        flags = flags | (serious_vals > 0).astype(int)
+    if flags.sum() > 0:
+        return flags.astype(int)
+
     k_col = _normal_col(work, ["K_Crash", "K_Crashes", "Fatal_Crash", "Fatal_Crashes", "Crash_K", "Is_K"])
     a_col = _normal_col(work, ["A_Crash", "A_Crashes", "Serious_Injury_Crash", "Serious_Injury_Crashes", "Crash_A", "Is_A"])
     if k_col or a_col:
@@ -7263,6 +7388,10 @@ def _dashboard_hin_crash_join(hin, crashes=None):
         return pd.DataFrame()
 
     try:
+        if not isinstance(hin_gdf, gpd.GeoDataFrame):
+            hin_gdf = gpd.GeoDataFrame(hin_gdf, geometry="geometry")
+        if not isinstance(crash_gdf, gpd.GeoDataFrame):
+            crash_gdf = gpd.GeoDataFrame(crash_gdf, geometry="geometry")
         if hin_gdf.crs is None:
             hin_gdf = hin_gdf.set_crs(4326, allow_override=True)
         if crash_gdf.crs is None:
@@ -7401,7 +7530,7 @@ def _hin_ka_bubble_figure(hin):
     work["KSI (K+A) crashes"] = pd.to_numeric(work.get("KSI_Crashes_Dashboard", 0), errors="coerce").fillna(0).astype(int)
     work["Crash count"] = pd.to_numeric(work.get("Dashboard_Crash_Count", 0), errors="coerce").fillna(0).astype(int)
 
-    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "CorridorRoute", "RouteName_Calc", "Name"])
+    route_col = _dashboard_route_col(work)
     id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
     length_col = _dashboard_length_col(work)
     hover_cols = [c for c in [id_col, route_col, length_col, "Crash count", "KSI (K+A) crashes"] if c and c in work.columns]
@@ -7490,8 +7619,19 @@ def _render_hin_network_summary(st, hin, crashes):
     pct_mi = high_mi / total_mi * 100 if total_mi else 0.0
 
     crash_source = _dashboard_crashes_source_gdf(crashes)
-    crash_subset, capture_note = _selected_hin_crash_subset(selected, crash_source)
     total_crashes = _safe_unique_crash_count(crash_source)
+
+    selected_is_full_network = False
+    try:
+        selected_is_full_network = len(selected) >= len(work) and len(work) > 0
+    except Exception:
+        selected_is_full_network = False
+    if selected_is_full_network:
+        crash_subset = crash_source.copy() if crash_source is not None else pd.DataFrame()
+        capture_note = "The selected HIN includes 100% of analyzed HIN rows, so the dashboard uses all loaded HIN crash records for the selected-network crash and KSI capture cards."
+    else:
+        crash_subset, capture_note = _selected_hin_crash_subset(selected, crash_source)
+
     high_crashes = _safe_unique_crash_count(crash_subset)
     pct_crash = high_crashes / total_crashes * 100 if total_crashes else 0.0
 
@@ -7508,7 +7648,7 @@ def _render_hin_network_summary(st, hin, crashes):
         preview_cols = []
         for c in [
             _normal_col(selected_display, ["RiskSegmentID", "WindowID", "SegmentID", "UnitID", "CorridorID"]),
-            _normal_col(selected_display, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"]),
+            _dashboard_route_col(selected_display),
             _dashboard_length_col(selected_display), "Dashboard_Crash_Count", "KSI_Crashes_Dashboard",
             metric, "Dashboard_Analysis_Years", "Crash_per_Mile_per_Year", "KSI_per_Mile_per_Year",
         ]:
@@ -7539,7 +7679,7 @@ def _hin_table_for_display(hin, metric, top_n=20):
     work = work.sort_values(metric, ascending=False).head(top_n).reset_index(drop=True)
 
     id_col = _normal_col(work, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "SourceSegmentID", "CorridorID"])
-    route_col = _normal_col(work, ["Route", "FULLNAME", "RoadName", "RouteName", "CorridorRoute", "RouteName_Calc", "Name"])
+    route_col = _dashboard_route_col(work)
     length_col = _dashboard_length_col(work)
     from_col = _normal_col(work, ["FromMile", "From_Mile", "from_mile", "BeginMile", "StartMile", "WindowFromMile", "Win_From_Mi"])
     to_col = _normal_col(work, ["ToMile", "To_Mile", "to_mile", "EndMile", "WindowToMile", "Win_To_Mi"])
@@ -7849,12 +7989,12 @@ def _hin_distribution_figures(hin):
         route_stats[metric] = pd.to_numeric(route_stats[metric], errors="coerce").fillna(0)
         route_stats = route_stats.groupby(route_col, dropna=False)[metric].agg(["mean", "median"]).reset_index()
         route_stats = route_stats.sort_values("mean", ascending=False).head(15)
-        route_stats["Average HIN"] = -route_stats["mean"]
+        route_stats["Average HIN"] = route_stats["mean"]
         route_stats["Median HIN"] = route_stats["median"]
         plot_df = route_stats[[route_col, "Average HIN", "Median HIN"]].copy()
         long_df = plot_df.melt(id_vars=[route_col], value_vars=["Average HIN", "Median HIN"], var_name="Metric", value_name="Value")
         fig2 = px.bar(long_df, x="Value", y=route_col, color="Metric", orientation="h", title="Average and median HIN by route")
-        fig2.update_layout(xaxis_title="HIN priority index (average shown left, median right)", yaxis_title="Route", barmode="relative")
+        fig2.update_layout(xaxis_title="HIN priority index", yaxis_title="Route", barmode="group")
         figures.append(("Average and median HIN by route", _polish_figure(fig2), route_stats))
     return figures
 
@@ -8052,7 +8192,7 @@ def _render_hin_network_summary(st, hin, crashes):
         preview_cols = []
         for c in [
             _normal_col(selected_display, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "CorridorID"]),
-            _normal_col(selected_display, ["Route", "FULLNAME", "RoadName", "RouteName", "RouteName_Calc", "CorridorRoute"]),
+            _dashboard_route_col(selected_display),
             _dashboard_length_col(selected_display),
             _normal_col(selected_display, ["Win_Start_M", "FromMile", "From_Mile", "WindowFromMile", "Win_From_Mi"]),
             _normal_col(selected_display, ["Win_End_M", "ToMile", "To_Mile", "WindowToMile", "Win_To_Mi"]),
