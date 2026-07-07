@@ -224,31 +224,86 @@ def detect_field_mapping(df):
 
 
 def normalize_kabco_value(value):
-    """Normalize common crash severity labels to K/A/B/C/O."""
+    """Normalize common crash severity labels to standard K/A/B/C/O.
+
+    This is used after the user maps the crash severity field.  Different
+    agencies store the same meaning with different text, for example
+    ``Fatal``, ``Fatality``, ``Suspected Serious Injury``, ``PDO``, or
+    ``Property Damage Only``.  The app standardizes those labels before EPDO,
+    KSI, dashboard charts, and HIN summaries are calculated.
+    """
     if value is None:
         return "Unknown"
+    try:
+        if pd.isna(value):
+            return "Unknown"
+    except Exception:
+        pass
+
     text = str(value).strip()
     if not text:
         return "Unknown"
+
     upper = text.upper().strip()
     if upper in {"K", "A", "B", "C", "O"}:
         return upper
-    if upper in {"PDO", "N", "NO INJURY"}:
-        return "O"
-    s = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
-    # Order matters.  Check B non-incapacitating before A incapacitating because
-    # the word "incapacitating" is contained inside "non-incapacitating".
-    if "fatal" in s or "killed" in s or "death" in s or re.search(r"\bk\b", s):
-        return "K"
-    if "non incapacitating" in s or "nonincapacitating" in s or "level b" in s or re.search(r"\bb\b", s) or "minor" in s:
-        return "B"
-    if "incapacitating" in s or "serious" in s or "level a" in s or re.search(r"\ba\b", s):
-        return "A"
-    if "possible" in s or "complaint" in s or "level c" in s or re.search(r"\bc\b", s):
-        return "C"
-    if "no injury" in s or "uninjured" in s or "not injured" in s or "property damage" in s or "pdo" in s or re.search(r"\bo\b", s):
+    s = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    padded = f" {s} "
+
+    # Exact/short common values.
+    if upper in {"PDO", "PD", "PROPERTY DAMAGE ONLY", "NO INJURY", "NO APPARENT INJURY", "N", "NONE"}:
         return "O"
+
+    # Explicit KABCO code labels.
+    if re.search(r"\b(k|level k|severity k)\b", s):
+        return "K"
+    if re.search(r"\b(a|level a|severity a)\b", s):
+        return "A"
+    if re.search(r"\b(b|level b|severity b)\b", s):
+        return "B"
+    if re.search(r"\b(c|level c|severity c)\b", s):
+        return "C"
+    if re.search(r"\b(o|level o|severity o)\b", s):
+        return "O"
+
+    # Text severity labels.  Order matters:
+    # non-incapacitating (B) must be checked before incapacitating (A).
+    if any(term in padded for term in [
+        " fatal ", " fatalities ", " fatality ", " fatal crash ",
+        " killed ", " death ", " deceased ", " person killed ",
+    ]):
+        return "K"
+
+    if any(term in padded for term in [
+        " suspected serious injury ", " serious injury ", " serious injuries ",
+        " incapacitating injury ", " incapacitating injuries ",
+        " severe injury ", " severe injuries ",
+    ]):
+        return "A"
+
+    if any(term in padded for term in [
+        " suspected minor injury ", " minor injury ", " minor injuries ",
+        " non incapacitating injury ", " non incapacitating injuries ",
+        " nonincapacitating injury ", " nonincapacitating injuries ",
+        " non incapac ", " nonincap ",
+    ]):
+        return "B"
+
+    if any(term in padded for term in [
+        " possible injury ", " possible injuries ",
+        " complaint of injury ", " complaint of pain ",
+        " pain ",
+    ]):
+        return "C"
+
+    if any(term in padded for term in [
+        " pdo ", " property damage ", " property damage only ",
+        " no injury ", " no apparent injury ", " uninjured ",
+        " not injured ", " no injuries ",
+    ]):
+        return "O"
+
     return text
 
 
