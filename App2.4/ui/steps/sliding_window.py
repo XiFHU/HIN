@@ -21,6 +21,105 @@ def _mapped_crash_id_col(df):
     return resolve_crash_id_col(df)
 
 
+
+
+def _route_name_column_options_for_s7(roads_df):
+    """Return route/name columns with readable OSM/TIGER names first.
+
+    OSM roads created by the app carry RouteNameOSM after FromMile/ToMile
+    generation.  Keep that before generic Route fields so the sliding-window
+    UI does not default to numeric/internal OSM IDs.
+    """
+    if roads_df is None or not hasattr(roads_df, "columns"):
+        return [], 0
+
+    cols = list(roads_df.columns)
+    preferred = [
+        "RouteNameOSM",
+        "Dashboard_Route_Name",
+        "FULLNAME",
+        "RouteName_Calc",
+        "RouteName",
+        "RoadName",
+        "Road_Name",
+        "name",
+        "Name",
+        "NAME",
+        "CorridorRoute",
+        "Route",
+    ]
+
+    ordered = []
+    for wanted in preferred:
+        for col in cols:
+            if str(col).lower().replace("_", "").replace(" ", "") == str(wanted).lower().replace("_", "").replace(" ", ""):
+                if col not in ordered:
+                    ordered.append(col)
+
+    for col in cols:
+        if col not in ordered:
+            ordered.append(col)
+
+    default_col = None
+    for col in ordered:
+        if col not in roads_df.columns:
+            continue
+
+        vals = (
+            roads_df[col]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+        vals = vals[vals != ""]
+
+        if vals.empty:
+            continue
+
+        numeric_share = pd.to_numeric(
+            vals,
+            errors="coerce"
+        ).notna().mean()
+
+        if str(col).lower() == "route" and numeric_share > 0.80:
+            continue
+
+        default_col = col
+        break
+
+    if default_col is None and ordered:
+        default_col = ordered[0]
+
+    default_index = ordered.index(default_col) if default_col in ordered else 0
+
+    return ordered, default_index
+
+
+def _route_tooltip_fields(gdf, extra_fields=None):
+    """Common tooltip field order for route/HIN map layers."""
+    if gdf is None or not hasattr(gdf, "columns"):
+        return []
+
+    candidates = [
+        "Dashboard_Route_Name",
+        "RouteNameOSM",
+        "FULLNAME",
+        "RouteName_Calc",
+        "RouteName",
+        "RoadName",
+        "Road_Name",
+        "name",
+        "Name",
+        "NAME",
+        "Route",
+    ]
+
+    for field in extra_fields or []:
+        if field not in candidates:
+            candidates.append(field)
+
+    return [c for c in candidates if c in gdf.columns]
+
 def _build_original_crash_density_layer(selected_roads, crashes_s7, segment_id_col, crash_snap_dist_ft, crash_id_col=None):
     """Build crash density on the original uploaded/selected road segments."""
 
@@ -553,17 +652,15 @@ def _make_segment_comparison_map(
                             "opacity": 0.65,
                         },
                         tooltip=folium.GeoJsonTooltip(
-                            fields=[
-                                c for c in [
-                                    "FULLNAME",
-                                    "RouteName_Calc",
+                            fields=_route_tooltip_fields(
+                                sub,
+                                extra_fields=[
                                     "FromMile",
                                     "ToMile",
                                     "RoadClass",
                                     "RoadType"
                                 ]
-                                if c in sub.columns
-                            ],
+                            ),
                             localize=True
                         ) if any(c in sub.columns for c in ["FULLNAME", "RouteName_Calc", "RoadClass"]) else None
                     ).add_to(fmap)
@@ -600,18 +697,16 @@ def _make_segment_comparison_map(
                     if sub.empty:
                         continue
 
-                    tooltip_fields = [
-                        c for c in [
-                            "FULLNAME",
-                            "RouteName_Calc",
+                    tooltip_fields = _route_tooltip_fields(
+                        sub,
+                        extra_fields=[
                             "FromMile",
                             "ToMile",
                             "RoadStyleClass",
                             "RoadClass",
                             "RoadType"
                         ]
-                        if c in sub.columns
-                    ]
+                    )
 
                     color = color_lookup.get(str(road_class), road_class_color(road_class))
 
@@ -767,18 +862,19 @@ def _make_segment_comparison_map(
                 }
 
             tooltip_fields = [
-                c for c in [
-                    "UnitID",
-                    "UnitType",
-                    "CrashCount",
-                    "CrashDensity",
-                    "Length_Miles",
-                    "Area_SqMi",
-                    "CorridorID",
-                    "SegmentID",
-                    "Route",
-                    "FULLNAME"
-                ]
+                c for c in (
+                    [
+                        "UnitID",
+                        "UnitType",
+                        "CrashCount",
+                        "CrashDensity",
+                        "Length_Miles",
+                        "Area_SqMi",
+                        "CorridorID",
+                        "SegmentID"
+                    ]
+                    + _route_tooltip_fields(spatial_units)
+                )
                 if c in spatial_units.columns
             ]
 
@@ -835,15 +931,17 @@ def _make_segment_comparison_map(
                 }
 
             tooltip_fields = [
-                c for c in [
-                    "UnitID",
-                    "FULLNAME",
-                    "FromMile",
-                    "ToMile",
-                    "CrashCount",
-                    "CrashDensity",
-                    "Length_Miles"
-                ]
+                c for c in (
+                    ["UnitID"]
+                    + _route_tooltip_fields(original_density)
+                    + [
+                        "FromMile",
+                        "ToMile",
+                        "CrashCount",
+                        "CrashDensity",
+                        "Length_Miles"
+                    ]
+                )
                 if c in original_density.columns
             ]
 
@@ -864,12 +962,16 @@ def _make_segment_comparison_map(
 
         if risk_corridors is not None and not risk_corridors.empty:
             tooltip_fields = [
-                c for c in [
-                    "CorridorID",
-                    "Route",
-                    "Max_HIN_Index",
-                    "Risk_Segment_Count"
-                ]
+                c for c in (
+                    ["CorridorID"]
+                    + _route_tooltip_fields(risk_corridors)
+                    + [
+                        "Max_HIN_Index",
+                        "Risk_Segment_Count",
+                        "Segment_Count",
+                        "Avg_HIN_Index"
+                    ]
+                )
                 if c in risk_corridors.columns
             ]
 
@@ -930,17 +1032,22 @@ def _make_segment_comparison_map(
                 }
 
             tooltip_fields = [
-                c for c in [
-                    "SegmentID",
-                    "UnitID",
-                    "Route",
-                    "FULLNAME",
-                    "HIN_Priority_Index",
-                    "CrashCount",
-                    "EPDO",
-                    "FromMile",
-                    "ToMile"
-                ]
+                c for c in (
+                    [
+                        "SegmentID",
+                        "SegID",
+                        "UnitID"
+                    ]
+                    + _route_tooltip_fields(risk_segments)
+                    + [
+                        "HIN_Priority_Index",
+                        "Crash_Count",
+                        "CrashCount",
+                        "EPDO",
+                        "FromMile",
+                        "ToMile"
+                    ]
+                )
                 if c in risk_segments.columns
             ]
 
@@ -1061,13 +1168,20 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
 
         with st.expander("Analysis Settings", expanded=True):
 
+            route_options_s7, route_default_index_s7 = _route_name_column_options_for_s7(
+                roads_for_s7
+            )
+
             route_col_s7 = st.selectbox(
                 "Route name column",
-                options=list(roads_for_s7.columns),
-                index=list(roads_for_s7.columns).index("FULLNAME")
-                if "FULLNAME" in roads_for_s7.columns
-                else 0,
-                key="section7_route_col"
+                options=route_options_s7,
+                index=route_default_index_s7,
+                key="section7_route_col",
+                help=(
+                    "Choose the readable route/name field used to group roads for sliding-window analysis. "
+                    "For OSM roads, RouteNameOSM is preferred when available. "
+                    "For TIGER roads, FULLNAME is preferred."
+                )
             )
 
             segment_id_col_s7 = st.session_state.get(
@@ -1329,6 +1443,11 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
 
             st.session_state["section7_results"] = results
             st.session_state["section7_route_col_s7"] = route_col_s7
+            st.session_state["section7_display_route_col_s7"] = (
+                "RouteNameOSM"
+                if "RouteNameOSM" in roads_for_s7.columns
+                else route_col_s7
+            )
             st.session_state["section7_original_density"] = original_density
             st.session_state["section7_crashes_for_map"] = crashes_s7
 
