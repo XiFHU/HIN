@@ -16,12 +16,23 @@ def section7_clean_risk_segments(
         "SegID",
         route_col,
         "Route",
+        "RouteKey",
+        "Dashboard_Route_Name",
+        "RouteNameOSM",
+        "FULLNAME",
         "RouteName_Calc",
+        "RouteName",
+        "RoadName",
+        "Road_Name",
+        "name",
+        "Name",
+        "NAME",
         "FromMile",
         "ToMile",
         "Crash_Count",
         "EPDO",
         "Max_Window_Score",
+        "High_Risk_Score",
         "HIN_Priority_Index",
         "Risk_Score",
         "Risk_Flag",
@@ -67,35 +78,71 @@ def clean_section7_output_gdf(
 
     gdf_clean = gdf.copy()
 
-    final_cols = [
-        c for c in keep_cols
-        if c in gdf_clean.columns
-    ]
+    # Remove duplicate column names first.
+    # This prevents gdf_clean[col] from returning a DataFrame instead of a Series.
+    gdf_clean = gdf_clean.loc[
+        :,
+        ~gdf_clean.columns.duplicated()
+    ].copy()
 
-    if "geometry" in gdf_clean.columns:
+    final_cols = []
+
+    for col in keep_cols:
+
+        if col is None:
+            continue
+
+        if col in gdf_clean.columns and col not in final_cols:
+            final_cols.append(col)
+
+    if "geometry" in gdf_clean.columns and "geometry" not in final_cols:
         final_cols.append("geometry")
 
     gdf_clean = gdf_clean[
         final_cols
     ].copy()
 
-    for col in gdf_clean.columns:
+    def _safe_to_text(value):
+
+        try:
+            if value is None:
+                return None
+
+            if isinstance(
+                value,
+                (
+                    pd.Series,
+                    pd.DataFrame,
+                    list,
+                    tuple,
+                    dict
+                )
+            ):
+                return str(value)
+
+            if pd.isna(value):
+                return None
+
+            return str(value)
+
+        except Exception:
+            return str(value)
+
+    for col in list(gdf_clean.columns):
 
         if col == "geometry":
             continue
 
-        gdf_clean[col] = (
-            gdf_clean[col]
-            .apply(
-                lambda x:
-                None
-                if pd.isna(x)
-                else str(x)
-            )
+        col_data = gdf_clean[col]
+
+        if isinstance(col_data, pd.DataFrame):
+            col_data = col_data.iloc[:, 0]
+
+        gdf_clean[col] = col_data.map(
+            _safe_to_text
         )
 
     return gdf_clean
-
 
 def estimate_projected_crs(gdf):
     try:
@@ -136,11 +183,10 @@ def clean_linestring(geom):
 def add_standard_route_name_columns(gdf, route_col):
     """Add stable route-name aliases for tables, dashboard charts, and exports.
 
-    The analysis method may use a source-specific route column such as FULLNAME
-    for TIGER, name/Name for OSM, or a user-selected custom field.  Downstream
-    dashboard and export code needs a consistent readable route field, so keep
-    the original route column and also add Route / RouteName_Calc aliases.
-    This does not change geometry, scoring, thresholds, or crash assignment.
+    RouteKey is the internal grouping key used by the sliding-window method.
+    Dashboard_Route_Name is the readable display name used in tables, charts,
+    maps, and reports. This does not change geometry, scoring, thresholds,
+    or crash assignment.
     """
 
     if gdf is None:
@@ -148,6 +194,7 @@ def add_standard_route_name_columns(gdf, route_col):
 
     out = gdf.copy()
 
+    route_values = None
     if route_col is not None and route_col in out.columns:
         route_values = (
             out[route_col]
@@ -160,10 +207,58 @@ def add_standard_route_name_columns(gdf, route_col):
             "Unknown route"
         )
 
+        if "RouteKey" not in out.columns:
+            out["RouteKey"] = route_values
         if "Route" not in out.columns:
             out["Route"] = route_values
         if "RouteName_Calc" not in out.columns:
             out["RouteName_Calc"] = route_values
+
+    display_candidates = [
+        "Dashboard_Route_Name",
+        "RouteNameOSM",
+        "FULLNAME",
+        "RouteName_Calc",
+        "RouteName",
+        "RoadName",
+        "Road_Name",
+        "name",
+        "Name",
+        "NAME",
+    ]
+
+    display_values = None
+    for col in display_candidates:
+        if col not in out.columns:
+            continue
+        vals = (
+            out[col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        vals = vals.where(vals != "", None)
+        if vals.notna().any():
+            display_values = vals
+            break
+
+    if display_values is None and route_values is not None:
+        display_values = route_values
+
+    if display_values is not None:
+        if "Dashboard_Route_Name" not in out.columns:
+            out["Dashboard_Route_Name"] = display_values.fillna("Unknown route")
+        else:
+            existing = (
+                out["Dashboard_Route_Name"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
+            out["Dashboard_Route_Name"] = existing.where(
+                existing != "",
+                display_values.fillna("Unknown route")
+            )
 
     return out
 
@@ -632,6 +727,7 @@ def score_segments(
         segs["Crash_Count"] = 0
         segs["EPDO"] = 0
         segs["Max_Window_Score"] = 0
+        segs["High_Risk_Score"] = 0
         segs["HIN_Priority_Index"] = 0
         segs["Risk_Score"] = 0
         segs["Risk_Flag"] = False
@@ -705,6 +801,10 @@ def score_segments(
             )
 
     segs["Max_Window_Score"] = max_scores
+    segs["High_Risk_Score"] = pd.to_numeric(
+        segs["Max_Window_Score"],
+        errors="coerce"
+    ).fillna(0)
     segs["Crash_Count"] = max_crash_counts
     segs["EPDO"] = max_epdo_scores
 
@@ -725,7 +825,13 @@ def score_segments(
             ).fillna(0) / max_raw_score * 100
         )
 
-    # Backward-compatible alias. Use HIN_Priority_Index in the UI/map.
+    # Backward-compatible aliases.
+    # High_Risk_Score is the raw, non-normalized max overlapping window score.
+    # HIN_Priority_Index is the normalized 0-100 screening index.
+    segs["High_Risk_Score"] = pd.to_numeric(
+        segs["High_Risk_Score"],
+        errors="coerce"
+    ).fillna(0)
     segs["Risk_Score"] = segs["HIN_Priority_Index"]
 
     positive_segments = segs[
@@ -830,6 +936,126 @@ def build_risk_corridors(
         ),
         route_col
     )
+
+
+def build_sliding_window_route_summary(
+    route_lines,
+    risk_windows,
+    crashes_route,
+    route_col
+):
+    """Create one summary row per route used by sliding-window analysis."""
+
+    rows = []
+
+    if route_lines is None or route_lines.empty:
+        return pd.DataFrame()
+
+    for _, route in route_lines.iterrows():
+        route_name = route.get(route_col, "Unknown route")
+        route_name_text = str(route_name)
+
+        route_windows = risk_windows[
+            risk_windows[route_col].astype(str) == route_name_text
+        ].copy() if risk_windows is not None and not risk_windows.empty else pd.DataFrame()
+
+        if crashes_route is not None and not crashes_route.empty and route_col in crashes_route.columns:
+            route_crashes = crashes_route[
+                crashes_route[route_col].astype(str) == route_name_text
+            ].copy()
+        else:
+            route_crashes = pd.DataFrame()
+
+        route_length_mi = route.get("Route_Length_Mi", None)
+        if route_length_mi is None or pd.isna(route_length_mi):
+            try:
+                route_length_mi = route.geometry.length / 1609.344
+            except Exception:
+                route_length_mi = 0.0
+
+        max_crash_count = 0.0
+        max_epdo = 0.0
+        max_high_risk_score = 0.0
+        max_hin_index = 0.0
+
+        if not route_windows.empty:
+            if "Crash_Count" in route_windows.columns:
+                max_crash_count = float(
+                    pd.to_numeric(route_windows["Crash_Count"], errors="coerce")
+                    .fillna(0)
+                    .max()
+                )
+
+            if "EPDO" in route_windows.columns:
+                max_epdo = float(
+                    pd.to_numeric(route_windows["EPDO"], errors="coerce")
+                    .fillna(0)
+                    .max()
+                )
+
+            score_col = (
+                "High_Risk_Score"
+                if "High_Risk_Score" in route_windows.columns
+                else "Window_Score"
+            )
+            if score_col in route_windows.columns:
+                max_high_risk_score = float(
+                    pd.to_numeric(route_windows[score_col], errors="coerce")
+                    .fillna(0)
+                    .max()
+                )
+
+        assigned_crash_count = unique_crash_count(route_crashes)
+        assigned_epdo = unique_epdo_total(route_crashes) if not route_crashes.empty else 0.0
+
+        display_route = route.get("Dashboard_Route_Name", route_name_text)
+        for candidate in [
+            "Dashboard_Route_Name",
+            "RouteNameOSM",
+            "FULLNAME",
+            "RouteName_Calc",
+            "RouteName",
+            "RoadName",
+            "Road_Name",
+            "name",
+            "Name",
+            "NAME",
+        ]:
+            if candidate in route.index:
+                value = str(route.get(candidate, "")).strip()
+                if value:
+                    display_route = value
+                    break
+
+        rows.append(
+            {
+                "Route": route_name_text,
+                "Dashboard_Route_Name": display_route,
+                "Route_Length_Miles": float(route_length_mi or 0.0),
+                "Window_Count": int(len(route_windows)),
+                "Assigned_Crash_Count": int(assigned_crash_count),
+                "Assigned_EPDO": float(assigned_epdo),
+                "Max_Window_Crash_Count": float(max_crash_count),
+                "Max_Window_EPDO": float(max_epdo),
+                "Max_High_Risk_Score": float(max_high_risk_score),
+                "Max_HIN_Priority_Index": float(max_hin_index),
+            }
+        )
+
+    summary = pd.DataFrame(rows)
+
+    if not summary.empty:
+        summary = summary.sort_values(
+            [
+                "Max_High_Risk_Score",
+                "Max_Window_Crash_Count",
+                "Max_Window_EPDO",
+                "Dashboard_Route_Name",
+            ],
+            ascending=[False, False, False, True],
+        ).reset_index(drop=True)
+
+    return summary
 
 
 def run_sliding_window_risk_analysis(
@@ -994,6 +1220,32 @@ def run_sliding_window_risk_analysis(
         route_col
     )
 
+    route_summary = build_sliding_window_route_summary(
+        route_lines=route_lines,
+        risk_windows=risk_windows,
+        crashes_route=crashes_route,
+        route_col=route_col
+    )
+
+    if not route_summary.empty and not risk_segments.empty:
+        route_hin = risk_segments.copy()
+        route_hin[route_col] = route_hin[route_col].astype(str)
+        route_max_hin = (
+            route_hin
+            .groupby(route_col)["HIN_Priority_Index"]
+            .max()
+            .to_dict()
+        )
+        route_summary["Max_HIN_Priority_Index"] = (
+            route_summary["Route"]
+            .astype(str)
+            .map(route_max_hin)
+        )
+        route_summary["Max_HIN_Priority_Index"] = pd.to_numeric(
+            route_summary["Max_HIN_Priority_Index"],
+            errors="coerce"
+        ).fillna(0)
+
     return {
         "route_lines": route_lines,
         "risk_windows": risk_windows,
@@ -1001,7 +1253,8 @@ def run_sliding_window_risk_analysis(
         "risk_segments": risk_segments,
         "risk_corridors": risk_corridors,
         "risk_threshold": risk_threshold,
-        "assigned_crashes": crashes_route
+        "assigned_crashes": crashes_route,
+        "route_summary": route_summary
     }
 
 
@@ -1244,6 +1497,7 @@ def section7_excel_bytes(
     risk_windows,
     risk_segments,
     risk_corridors=None,
+    route_summary=None,
     include_corridors=True
 ):
     output = io.BytesIO()
@@ -1270,6 +1524,13 @@ def section7_excel_bytes(
             sheet_name="Risk_Segments",
             index=False
         )
+
+        if route_summary is not None and not route_summary.empty:
+            route_summary.to_excel(
+                writer,
+                sheet_name="Route_Summary",
+                index=False
+            )
 
         if include_corridors and risk_corridors is not None:
             risk_corridors.drop(

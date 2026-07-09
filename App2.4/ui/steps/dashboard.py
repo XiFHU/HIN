@@ -277,6 +277,8 @@ def _available_tables(st):
             tables["Sliding windows"] = _drop_geometry(results["risk_windows"])
         if results.get("risk_corridors") is not None:
             tables["HIN corridors"] = _drop_geometry(results["risk_corridors"])
+        if results.get("route_summary") is not None:
+            tables["Sliding-window route summary"] = _drop_geometry(results["route_summary"])
 
     if st.session_state.get("corridors") is not None:
         tables["Generated corridors"] = _drop_geometry(st.session_state["corridors"])
@@ -2491,6 +2493,53 @@ def _render_dashboard_builder(st, tables):
         st.dataframe(_safe_dataframe_for_display(_rank_table(df, metric).head(50)), width="stretch", hide_index=True)
 
 
+def _render_sliding_window_route_summary_table(st, tables):
+    """Show route-level sliding-window summary in the dashboard."""
+
+    route_summary = tables.get("Sliding-window route summary")
+    if route_summary is None or getattr(route_summary, "empty", True):
+        return
+
+    st.markdown(
+        "<div class='dashboard-section-title'>Sliding-window route summary "
+        "<span>route length, window count, and route-level max scores</span></div>",
+        unsafe_allow_html=True,
+    )
+
+    display = route_summary.copy()
+    preferred_cols = [
+        "Dashboard_Route_Name",
+        "Route",
+        "Route_Length_Miles",
+        "Window_Count",
+        "Assigned_Crash_Count",
+        "Assigned_EPDO",
+        "Max_Window_Crash_Count",
+        "Max_Window_EPDO",
+        "Max_High_Risk_Score",
+        "Max_HIN_Priority_Index",
+    ]
+    cols = [c for c in preferred_cols if c in display.columns]
+    if cols:
+        display = display[cols].copy()
+
+    for col in [
+        "Route_Length_Miles",
+        "Assigned_EPDO",
+        "Max_Window_EPDO",
+        "Max_High_Risk_Score",
+        "Max_HIN_Priority_Index",
+    ]:
+        if col in display.columns:
+            display[col] = pd.to_numeric(display[col], errors="coerce").round(3)
+
+    st.dataframe(
+        _safe_dataframe_for_display(display),
+        width="stretch",
+        hide_index=True,
+    )
+
+
 def render_dashboard_page(st):
     _style(st)
 
@@ -2527,6 +2576,7 @@ def render_dashboard_page(st):
 
     with tab_insights:
         _render_pattern_charts(st, tables)
+        _render_sliding_window_route_summary_table(st, tables)
 
     with tab_builder:
         _render_dashboard_builder(st, tables)

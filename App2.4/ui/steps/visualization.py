@@ -242,18 +242,218 @@ def _render_summary_visualization(st_folium, workflow_context):
     )
 
 
-def _render_hin_summary_visualization(st_folium, workflow_context):
-    """Display-only HIN threshold/summary map.
+def _ensure_high_risk_score_column(gdf):
+    """Add raw, non-normalized sliding-window score when missing."""
+    if gdf is None:
+        return gdf
 
-    This mirrors the crash-density threshold/summary map, but uses existing
-    sliding-window HIN results. It does not rerun or overwrite HIN analysis.
-    """
+    out = gdf.copy()
+
+    if "High_Risk_Score" not in out.columns:
+        if "Max_Window_Score" in out.columns:
+            out["High_Risk_Score"] = pd.to_numeric(
+                out["Max_Window_Score"],
+                errors="coerce"
+            ).fillna(0)
+        else:
+            out["High_Risk_Score"] = 0
+
+    out["High_Risk_Score"] = pd.to_numeric(
+        out["High_Risk_Score"],
+        errors="coerce"
+    ).fillna(0)
+
+    return out
+
+
+def _hin_summary_metric_options(risk_segments_clean, preferred_metric):
+    preferred = [
+        preferred_metric,
+        "HIN_Priority_Index",
+        "High_Risk_Score",
+        "Max_Window_Score",
+        "RiskScore",
+        "CrashCount",
+        "Crash_Count",
+        "EPDO",
+        "KSI_Count",
+    ]
+
+    numeric_cols = []
+    for col in preferred:
+        if col in risk_segments_clean.columns and col not in numeric_cols:
+            numeric_cols.append(col)
+
+    if not numeric_cols:
+        numeric_cols = [
+            c for c in risk_segments_clean.columns
+            if c != "geometry"
+            and pd.api.types.is_numeric_dtype(risk_segments_clean[c])
+        ]
+
+    return numeric_cols
+
+
+def _apply_summary_statistic_filter(
+    st,
+    display_segments,
+    metric,
+    metric_values,
+    threshold_base,
+    summary_type,
+    custom_threshold,
+    label_prefix
+):
+    if summary_type == "Above average":
+        threshold = float(threshold_base.mean()) if not threshold_base.empty else 0.0
+        display_segments = display_segments[metric_values >= threshold].copy()
+        st.caption(
+            f"Showing {label_prefix} with {metric} >= positive-value average "
+            f"({threshold:.2f})."
+        )
+
+    elif summary_type == "Above median":
+        threshold = float(threshold_base.median()) if not threshold_base.empty else 0.0
+        display_segments = display_segments[metric_values >= threshold].copy()
+        st.caption(
+            f"Showing {label_prefix} with {metric} >= positive-value median "
+            f"({threshold:.2f})."
+        )
+
+    elif summary_type in [
+        "25th percentile",
+        "50th percentile / median",
+        "75th percentile",
+    ]:
+        percentile_lookup = {
+            "25th percentile": 0.25,
+            "50th percentile / median": 0.50,
+            "75th percentile": 0.75,
+        }
+        percentile_value = percentile_lookup[summary_type]
+        threshold = (
+            float(threshold_base.quantile(percentile_value))
+            if not threshold_base.empty
+            else 0.0
+        )
+        display_segments = display_segments[metric_values >= threshold].copy()
+        st.caption(
+            f"Showing {label_prefix} with {metric} >= {summary_type} "
+            f"of positive values ({threshold:.2f})."
+        )
+
+    elif summary_type == "IQR high-outlier threshold":
+        if not threshold_base.empty:
+            q1 = float(threshold_base.quantile(0.25))
+            q3 = float(threshold_base.quantile(0.75))
+            iqr = q3 - q1
+            threshold = q3 + 1.5 * iqr
+            display_segments = display_segments[metric_values >= threshold].copy()
+
+            if display_segments.empty:
+                threshold = q3
+                display_segments = display_segments.iloc[0:0].copy()
+                fallback_segments = metric_values >= threshold
+                st.caption(
+                    "IQR high-outlier threshold selected no segments/windows, "
+                    "so the map is using Q3 instead. "
+                    f"Showing {metric} >= Q3 ({threshold:.2f})."
+                )
+                return fallback_segments, threshold, "mask"
+
+            st.caption(
+                f"Showing {label_prefix} with {metric} >= IQR high-outlier "
+                f"threshold Q3 + 1.5 × IQR ({threshold:.2f})."
+            )
+        else:
+            threshold = 0.0
+            display_segments = display_segments[metric_values >= threshold].copy()
+            st.caption(
+                f"No valid {metric} values were available for IQR; "
+                f"showing {metric} >= 0.00."
+            )
+
+    elif summary_type == "IQR low-outlier threshold":
+        if not threshold_base.empty:
+            q1 = float(threshold_base.quantile(0.25))
+            q3 = float(threshold_base.quantile(0.75))
+            iqr = q3 - q1
+            threshold = q1 - 1.5 * iqr
+            display_segments = display_segments[metric_values <= threshold].copy()
+            st.caption(
+                f"Showing {label_prefix} with {metric} <= IQR low-outlier "
+                f"threshold Q1 - 1.5 × IQR ({threshold:.2f})."
+            )
+        else:
+            threshold = 0.0
+            display_segments = display_segments[metric_values <= threshold].copy()
+            st.caption(
+                f"No valid {metric} values were available for IQR; "
+                f"showing {metric} <= 0.00."
+            )
+
+    elif summary_type == "Median + 1.5 × IQR threshold":
+        if not threshold_base.empty:
+            q1 = float(threshold_base.quantile(0.25))
+            q3 = float(threshold_base.quantile(0.75))
+            median_value = float(threshold_base.median())
+            iqr = q3 - q1
+            threshold = median_value + 1.5 * iqr
+            display_segments = display_segments[metric_values >= threshold].copy()
+
+            if display_segments.empty:
+                threshold = median_value
+                display_segments = display_segments.iloc[0:0].copy()
+                fallback_segments = metric_values >= threshold
+                st.caption(
+                    "Median + 1.5 × IQR threshold selected no segments/windows, "
+                    "so the map is using the median instead. "
+                    f"Showing {metric} >= median ({threshold:.2f})."
+                )
+                return fallback_segments, threshold, "mask"
+
+            st.caption(
+                f"Showing {label_prefix} with {metric} >= Median + 1.5 × IQR "
+                f"threshold ({threshold:.2f})."
+            )
+        else:
+            threshold = 0.0
+            display_segments = display_segments[metric_values >= threshold].copy()
+            st.caption(
+                f"No valid {metric} values were available for IQR; "
+                f"showing {metric} >= 0.00."
+            )
+
+    elif summary_type == "Custom threshold":
+        threshold = float(custom_threshold if custom_threshold is not None else 0.0)
+        display_segments = display_segments[metric_values >= threshold].copy()
+        st.caption(f"Showing {label_prefix} with {metric} >= {threshold:.2f}.")
+
+    else:
+        threshold = None
+        st.caption(f"Showing {metric} value map for all {label_prefix}.")
+
+    return display_segments, threshold, "gdf"
+
+
+def _render_score_summary_visualization(
+    st_folium,
+    workflow_context,
+    preferred_metric,
+    metric_label,
+    layer_name,
+    key_prefix,
+):
+    """Shared threshold/summary map for normalized HIN or raw High Risk Score."""
     globals().update(workflow_context)
     sliding_window_ui.__dict__.update(workflow_context)
 
     results = st.session_state.get("section7_results", None)
     if results is None:
-        st.info("Run Sliding Window Risk Analysis first. Then the HIN threshold/summary map will appear here.")
+        st.info(
+            "Run Sliding Window Risk Analysis first. Then the threshold/summary "
+            "map will appear here."
+        )
         return
 
     risk_segments = results.get("risk_segments")
@@ -267,17 +467,16 @@ def _render_hin_summary_visualization(st_folium, workflow_context):
     risk_corridors = results.get("risk_corridors")
 
     risk_segments = sliding_window_ui._ensure_hin_priority_columns(risk_segments)
+    risk_segments = _ensure_high_risk_score_column(risk_segments)
     risk_segments_clean = section7_clean_risk_segments(risk_segments, route_col_s7)
-    risk_corridors_clean = section7_clean_risk_corridors(risk_corridors, route_col_s7) if risk_corridors is not None else None
+    risk_segments_clean = _ensure_high_risk_score_column(risk_segments_clean)
 
-    numeric_cols = [
-        c for c in [
-            "HIN_Priority_Index", "RiskScore", "CrashCount", "Crash_Count", "EPDO", "KSI_Count"
-        ]
-        if c in risk_segments_clean.columns
-    ]
-    if not numeric_cols:
-        numeric_cols = [c for c in risk_segments_clean.columns if c != "geometry" and pd.api.types.is_numeric_dtype(risk_segments_clean[c])]
+    if risk_corridors is not None:
+        risk_corridors_clean = section7_clean_risk_corridors(risk_corridors, route_col_s7)
+    else:
+        risk_corridors_clean = None
+
+    numeric_cols = _hin_summary_metric_options(risk_segments_clean, preferred_metric)
     if not numeric_cols:
         st.warning("No numeric HIN fields are available for threshold/summary mapping.")
         return
@@ -285,13 +484,13 @@ def _render_hin_summary_visualization(st_folium, workflow_context):
     c1, c2 = st.columns([0.35, 0.65])
     with c1:
         metric = st.selectbox(
-            "HIN summary metric",
+            f"{metric_label} summary metric",
             numeric_cols,
-            index=0 if "HIN_Priority_Index" not in numeric_cols else numeric_cols.index("HIN_Priority_Index"),
-            key="hin_summary_map_metric",
+            index=0 if preferred_metric not in numeric_cols else numeric_cols.index(preferred_metric),
+            key=f"{key_prefix}_metric",
         )
         summary_type = st.selectbox(
-            "HIN summary statistic",
+            f"{metric_label} summary statistic",
             [
                 "Value map",
                 "Above average",
@@ -300,9 +499,11 @@ def _render_hin_summary_visualization(st_folium, workflow_context):
                 "50th percentile / median",
                 "75th percentile",
                 "IQR high-outlier threshold",
+                "IQR low-outlier threshold",
+                "Median + 1.5 × IQR threshold",
                 "Custom threshold",
             ],
-            key="hin_summary_map_type_v2",
+            key=f"{key_prefix}_type_v2",
         )
         custom_threshold = None
         if summary_type == "Custom threshold":
@@ -311,10 +512,10 @@ def _render_hin_summary_visualization(st_folium, workflow_context):
             threshold_base = positive_values if not positive_values.empty else values.dropna()
             default_threshold = float(threshold_base.median()) if not threshold_base.empty else 0.0
             custom_threshold = st.number_input(
-                "Minimum HIN value",
+                f"Minimum {metric_label} value",
                 value=default_threshold,
                 step=5.0,
-                key="hin_summary_custom_threshold",
+                key=f"{key_prefix}_custom_threshold",
             )
 
     display_segments = risk_segments_clean.copy()
@@ -323,56 +524,21 @@ def _render_hin_summary_visualization(st_folium, workflow_context):
     positive_metric_values = valid_metric_values[valid_metric_values > 0]
     threshold_base = positive_metric_values if not positive_metric_values.empty else valid_metric_values
 
-    if summary_type == "Above average":
-        threshold = float(threshold_base.mean()) if not threshold_base.empty else 0.0
-        display_segments = display_segments[metric_values >= threshold].copy()
-        st.caption(f"Showing HIN segments/windows with {metric} >= positive-value average ({threshold:.2f}).")
-    elif summary_type == "Above median":
-        threshold = float(threshold_base.median()) if not threshold_base.empty else 0.0
-        display_segments = display_segments[metric_values >= threshold].copy()
-        st.caption(f"Showing HIN segments/windows with {metric} >= positive-value median ({threshold:.2f}).")
-    elif summary_type in ["25th percentile", "50th percentile / median", "75th percentile"]:
-        percentile_lookup = {
-            "25th percentile": 0.25,
-            "50th percentile / median": 0.50,
-            "75th percentile": 0.75,
-        }
-        percentile_value = percentile_lookup[summary_type]
-        threshold = float(threshold_base.quantile(percentile_value)) if not threshold_base.empty else 0.0
-        display_segments = display_segments[metric_values >= threshold].copy()
-        st.caption(
-            f"Showing HIN segments/windows with {metric} >= {summary_type} "
-            f"of positive HIN values ({threshold:.2f})."
-        )
-    elif summary_type == "IQR high-outlier threshold":
-        if not threshold_base.empty:
-            q1 = float(threshold_base.quantile(0.25))
-            q3 = float(threshold_base.quantile(0.75))
-            iqr = q3 - q1
-            threshold = q3 + 1.5 * iqr
-            display_segments = display_segments[metric_values >= threshold].copy()
-            if display_segments.empty:
-                threshold = q3
-                display_segments = risk_segments_clean[metric_values >= threshold].copy()
-                st.caption(
-                    f"IQR high-outlier threshold selected no segments/windows, so the map is using Q3 instead. "
-                    f"Showing {metric} >= Q3 ({threshold:.2f})."
-                )
-            else:
-                st.caption(
-                    f"Showing HIN segments/windows with {metric} >= IQR high-outlier threshold "
-                    f"Q3 + 1.5×IQR ({threshold:.2f})."
-                )
-        else:
-            threshold = 0.0
-            display_segments = display_segments[metric_values >= threshold].copy()
-            st.caption(f"No valid {metric} values were available for IQR; showing {metric} >= 0.00.")
-    elif summary_type == "Custom threshold":
-        threshold = float(custom_threshold if custom_threshold is not None else 0.0)
-        display_segments = display_segments[metric_values >= threshold].copy()
-        st.caption(f"Showing HIN segments/windows with {metric} >= {threshold:.2f}.")
+    filtered, threshold, filter_type = _apply_summary_statistic_filter(
+        st=st,
+        display_segments=display_segments,
+        metric=metric,
+        metric_values=metric_values,
+        threshold_base=threshold_base,
+        summary_type=summary_type,
+        custom_threshold=custom_threshold,
+        label_prefix="HIN segments/windows",
+    )
+
+    if filter_type == "mask":
+        display_segments = risk_segments_clean[filtered].copy()
     else:
-        st.caption(f"Showing {metric} value map for all HIN segments/windows.")
+        display_segments = filtered
 
     if display_segments.empty:
         st.warning("No HIN segments/windows match the selected summary threshold.")
@@ -392,14 +558,14 @@ def _render_hin_summary_visualization(st_folium, workflow_context):
             risk_corridors_clean["CorridorID"].astype(str).isin(selected_corridor_ids)
         ].copy()
 
-    with st.expander("HIN summary map color / legend settings", expanded=False):
+    with st.expander(f"{metric_label} summary map color / legend settings", expanded=False):
         risk_score_symbology = render_numeric_symbology_controls(
-            "HIN summary map",
-            key_prefix="viz_hin_summary_map",
+            f"{metric_label} summary map",
+            key_prefix=f"viz_{key_prefix}_map",
             default_method="Quantile",
         )
 
-    selected_layers = ["HIN Priority Index"]
+    selected_layers = [layer_name]
     fmap = sliding_window_ui._make_segment_comparison_map(
         original_density=st.session_state.get("section7_original_density", None),
         risk_segments=display_segments,
@@ -422,13 +588,112 @@ def _render_hin_summary_visualization(st_folium, workflow_context):
         height=760,
         width="100%",
         key=(
-            "viz_hin_summary_map_"
+            f"viz_{key_prefix}_map_"
             + str(summary_type)
             + "_"
             + str(metric)
             + "_"
             + str(len(display_segments))
         ),
+    )
+
+
+def _render_hin_summary_visualization(st_folium, workflow_context):
+    """Display-only HIN threshold/summary map using normalized 0-100 index."""
+    _render_score_summary_visualization(
+        st_folium=st_folium,
+        workflow_context=workflow_context,
+        preferred_metric="HIN_Priority_Index",
+        metric_label="HIN",
+        layer_name="HIN Priority Index",
+        key_prefix="hin_summary_map",
+    )
+
+
+def _render_high_risk_visualization(st_folium, workflow_context):
+    """Display raw, non-normalized sliding-window High Risk Score map."""
+    globals().update(workflow_context)
+    sliding_window_ui.__dict__.update(workflow_context)
+
+    results = st.session_state.get("section7_results", None)
+    if results is None:
+        st.info("Run Sliding Window Risk Analysis first. Then the High Risk Score map will appear here.")
+        return
+
+    final_corridors = st.session_state.get("final_corridors", st.session_state.get("corridors", None))
+    selected_roads = st.session_state.get("selected_roads", None)
+    route_col_s7 = st.session_state.get("section7_route_col_s7", st.session_state.get("route_col", "FULLNAME"))
+
+    risk_segments = sliding_window_ui._ensure_hin_priority_columns(results["risk_segments"])
+    risk_segments = _ensure_high_risk_score_column(risk_segments)
+    risk_segments_clean = section7_clean_risk_segments(risk_segments, route_col_s7)
+    risk_segments_clean = _ensure_high_risk_score_column(risk_segments_clean)
+
+    risk_corridors = results.get("risk_corridors")
+    risk_corridors_clean = section7_clean_risk_corridors(risk_corridors, route_col_s7) if risk_corridors is not None else None
+
+    f1, f2 = st.columns([0.24, 0.76])
+    with f1:
+        min_crash_count = st.number_input(
+            "Minimum crash count",
+            min_value=0,
+            value=0,
+            step=1,
+            key="viz_high_risk_min_crash_count",
+            help="Display-only filter. It does not rerun sliding-window analysis."
+        )
+
+    risk_segments_clean = _filter_by_crash_count(risk_segments_clean, min_crash_count)
+    if risk_segments_clean is None or risk_segments_clean.empty:
+        st.warning("No High Risk Score segments remain after the map filter. Lower the minimum crash count.")
+        return
+
+    risk_corridors_map = risk_corridors_clean
+    with st.expander("Optional High Risk Score map style", expanded=False):
+        risk_score_symbology = render_numeric_symbology_controls(
+            "High Risk Score",
+            key_prefix="viz_section7_high_risk_score",
+            default_method="Quantile",
+        )
+
+    selected_layers = ["High Risk Score"]
+    fmap = sliding_window_ui._make_segment_comparison_map(
+        original_density=st.session_state.get("section7_original_density", None),
+        risk_segments=risk_segments_clean,
+        risk_corridors=risk_corridors_map,
+        crashes=st.session_state.get("section7_crashes_for_map", st.session_state.get("crashes", None)),
+        roads=selected_roads,
+        roads_class=st.session_state.get("roads_class_display", None),
+        signals=st.session_state.get("signals_clean", None),
+        corridors=final_corridors,
+        spatial_units=st.session_state.get("spatial_units_density_map", st.session_state.get("spatial_units", None)),
+        selected_layers=selected_layers,
+        crash_density_symbology={"method": "Capped gradient"},
+        original_density_symbology={"method": "Capped gradient"},
+        risk_score_symbology=risk_score_symbology,
+        crash_color_settings={"enabled": False, "field": None},
+    )
+
+    st_folium(
+        fmap,
+        height=760,
+        width="100%",
+        key=(
+            "viz_section7_high_risk_score_map_"
+            + str(len(risk_segments_clean) if risk_segments_clean is not None else 0)
+        ),
+    )
+
+
+def _render_high_risk_summary_visualization(st_folium, workflow_context):
+    """Display raw, non-normalized High Risk Score threshold/summary map."""
+    _render_score_summary_visualization(
+        st_folium=st_folium,
+        workflow_context=workflow_context,
+        preferred_metric="High_Risk_Score",
+        metric_label="High Risk Score",
+        layer_name="High Risk Score",
+        key_prefix="high_risk_summary_map",
     )
 
 
@@ -445,6 +710,8 @@ def render_visualization_step(st_folium, workflow_context, spatial_unit=None):
     if st.session_state.get("section7_results", None) is not None:
         available_maps.append("HIN Priority Index Map")
         available_maps.append("HIN Threshold/Summary Map")
+        available_maps.append("High Risk Score Map")
+        available_maps.append("High Risk Score Threshold/Summary Map")
 
     if not available_maps:
         st.info("Run an analysis first. Visualization maps will appear here after results are available.")
@@ -461,7 +728,11 @@ def render_visualization_step(st_folium, workflow_context, spatial_unit=None):
     elif selected_map == "Crash Density Threshold/Summary Map":
         st.caption("Crash Density Threshold/Summary Map = a screening view from the same data, such as only units above the average or median. It does not create new analysis results.")
     elif selected_map == "HIN Threshold/Summary Map":
-        st.caption("HIN Threshold/Summary Map = a screening view from existing HIN results, such as HIN index above average, median, or a custom threshold. It does not recalculate HIN scores.")
+        st.caption("HIN Threshold/Summary Map = a screening view from existing HIN results, such as HIN index above average, median, percentile, IQR, or a custom threshold. It does not recalculate HIN scores.")
+    elif selected_map == "High Risk Score Map":
+        st.caption("High Risk Score Map = the raw, non-normalized sliding-window score. For Crash Count it is the maximum overlapping window crash count; for EPDO it is the maximum overlapping window EPDO.")
+    elif selected_map == "High Risk Score Threshold/Summary Map":
+        st.caption("High Risk Score Threshold/Summary Map = a screening view using the raw non-normalized sliding-window score with the same summary metric/statistic controls as the HIN threshold map.")
 
     if selected_map == "Crash Density Map":
         _render_crash_density_visualization(st_folium, workflow_context)
@@ -471,3 +742,7 @@ def render_visualization_step(st_folium, workflow_context, spatial_unit=None):
         _render_sliding_window_visualization(st_folium, workflow_context)
     elif selected_map == "HIN Threshold/Summary Map":
         _render_hin_summary_visualization(st_folium, workflow_context)
+    elif selected_map == "High Risk Score Map":
+        _render_high_risk_visualization(st_folium, workflow_context)
+    elif selected_map == "High Risk Score Threshold/Summary Map":
+        _render_high_risk_summary_visualization(st_folium, workflow_context)

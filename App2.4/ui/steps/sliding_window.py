@@ -335,6 +335,14 @@ def _ensure_hin_priority_columns(gdf):
         errors="coerce"
     ).fillna(0)
 
+    if "High_Risk_Score" not in out.columns:
+        out["High_Risk_Score"] = raw_score
+
+    out["High_Risk_Score"] = pd.to_numeric(
+        out["High_Risk_Score"],
+        errors="coerce"
+    ).fillna(0.0)
+
     if "HIN_Priority_Index" not in out.columns:
         max_raw_score = float(raw_score.max()) if len(raw_score) else 0.0
         if max_raw_score > 0:
@@ -393,6 +401,7 @@ def _apply_hin_selection_controls(risk_segments_clean):
 
     rank_candidates = [
         "HIN_Priority_Index",
+        "High_Risk_Score",
         "Max_Window_Score",
         "Crash_Count",
         "EPDO",
@@ -990,7 +999,11 @@ def _make_segment_comparison_map(
                 ) if tooltip_fields else None
             ).add_to(fmap)
 
-    if "HIN Priority Index" in selected_layers or "Risk Segments" in selected_layers:
+    if (
+        "HIN Priority Index" in selected_layers
+        or "Risk Segments" in selected_layers
+        or "High Risk Score" in selected_layers
+    ):
         risk_segments = clean_for_map(risk_segments)
 
         if risk_segments is not None and not risk_segments.empty:
@@ -998,26 +1011,49 @@ def _make_segment_comparison_map(
                 risk_segments,
                 numeric_cols=[
                     "HIN_Priority_Index",
+                    "High_Risk_Score",
+                    "Max_Window_Score",
                     "CrashCount",
+                    "Crash_Count",
                     "EPDO",
                     "Length_Miles"
                 ]
             )
 
+            if "High_Risk_Score" not in risk_segments.columns:
+                if "Max_Window_Score" in risk_segments.columns:
+                    risk_segments["High_Risk_Score"] = pd.to_numeric(
+                        risk_segments["Max_Window_Score"],
+                        errors="coerce"
+                    ).fillna(0)
+                else:
+                    risk_segments["High_Risk_Score"] = 0
+
+            risk_metric_col = (
+                "High_Risk_Score"
+                if "High Risk Score" in selected_layers
+                else "HIN_Priority_Index"
+            )
+            risk_layer_name = (
+                "High Risk Score"
+                if risk_metric_col == "High_Risk_Score"
+                else "HIN Priority Index"
+            )
+
             values = pd.to_numeric(
-                risk_segments["HIN_Priority_Index"],
+                risk_segments[risk_metric_col],
                 errors="coerce"
             ).fillna(0)
 
             risk_cmap = make_numeric_colormap(
                 values,
                 cm,
-                "HIN Priority Index",
+                risk_layer_name,
                 settings=risk_score_symbology,
             )
 
             def style_risk_segment(feature):
-                value = feature["properties"].get("HIN_Priority_Index", 0)
+                value = feature["properties"].get(risk_metric_col, 0)
                 try:
                     value = float(value)
                 except Exception:
@@ -1040,6 +1076,8 @@ def _make_segment_comparison_map(
                     ]
                     + _route_tooltip_fields(risk_segments)
                     + [
+                        "High_Risk_Score",
+                        "Max_Window_Score",
                         "HIN_Priority_Index",
                         "Crash_Count",
                         "CrashCount",
@@ -1053,7 +1091,7 @@ def _make_segment_comparison_map(
 
             folium.GeoJson(
                 make_json_safe_gdf(risk_segments),
-                name="HIN Priority Index",
+                name=risk_layer_name,
                 style_function=style_risk_segment,
                 tooltip=folium.GeoJsonTooltip(
                     fields=tooltip_fields,
@@ -1462,6 +1500,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
             )
             risk_corridors = results["risk_corridors"]
             route_lines = results["route_lines"]
+            route_summary = results.get("route_summary", pd.DataFrame())
 
 
             risk_segments_clean = section7_clean_risk_segments(
@@ -1536,17 +1575,35 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                         key="section7_download_segments_geojson"
                     )
 
+                    if route_summary is not None and not route_summary.empty:
+                        st.download_button(
+                            "Route Summary CSV",
+                            data=df_to_csv_bytes(route_summary),
+                            file_name="hin_route_summary.csv",
+                            mime="text/csv",
+                            key="section7_download_route_summary_csv"
+                        )
+
                     st.download_button(
                         "HIN Results Excel",
                         data=section7_excel_bytes(
                             risk_windows,
                             risk_segments_clean,
                             risk_corridors_clean,
+                            route_summary=route_summary,
                             include_corridors=False
                         ),
                         file_name="hin_sliding_window_results.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="section7_download_excel"
+                    )
+
+            if route_summary is not None and not route_summary.empty:
+                with st.expander("Sliding-window route summary", expanded=True):
+                    st.dataframe(
+                        route_summary,
+                        use_container_width=True,
+                        hide_index=True
                     )
 
 
@@ -1561,6 +1618,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
 
             comparison_layer_options = [
                 "HIN Priority Index",
+                "High Risk Score",
                 "Risk Corridors",
                 "Original Crash Density",
                 "Current Spatial Units / Crash Density",
@@ -1573,6 +1631,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
 
             default_comparison_layers = [
                 "HIN Priority Index",
+                "High Risk Score",
                 "Risk Corridors",
                 "Original Crash Density",
             ]
