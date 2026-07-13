@@ -78,8 +78,10 @@ def clean_section7_output_gdf(
 
     gdf_clean = gdf.copy()
 
-    # Remove duplicate column names first.
-    # This prevents gdf_clean[col] from returning a DataFrame instead of a Series.
+    # Remove duplicate column labels first.
+    # If duplicate labels remain, gdf_clean[col] can return a DataFrame
+    # instead of a Series, which causes:
+    # ValueError: The truth value of a Series is ambiguous.
     gdf_clean = gdf_clean.loc[
         :,
         ~gdf_clean.columns.duplicated()
@@ -143,6 +145,7 @@ def clean_section7_output_gdf(
         )
 
     return gdf_clean
+
 
 def estimate_projected_crs(gdf):
     try:

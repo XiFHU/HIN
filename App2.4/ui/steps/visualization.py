@@ -444,51 +444,141 @@ def _render_score_summary_visualization(
     layer_name,
     key_prefix,
 ):
-    """Shared threshold/summary map for normalized HIN or raw High Risk Score."""
+    """Shared threshold/summary map for normalized HIN or raw High Risk Score.
+
+    The user-facing metric dropdown should only show scoring methods:
+    - Crash Count
+    - EPDO
+
+    It should not show raw field names like High_Risk_Score,
+    HIN_Priority_Index, Max_Window_Score, Crash_Count, or EPDO.
+    """
     globals().update(workflow_context)
     sliding_window_ui.__dict__.update(workflow_context)
 
-    results = st.session_state.get("section7_results", None)
-    if results is None:
+    results_by_metric = st.session_state.get(
+        "section7_results_by_metric",
+        {}
+    )
+
+    available_methods = []
+
+    for method in [
+        "Crash Count",
+        "EPDO"
+    ]:
+        if method in results_by_metric:
+            method_results = results_by_metric.get(method)
+
+            if method_results is not None:
+                available_methods.append(method)
+
+    if not available_methods:
+        latest_results = st.session_state.get(
+            "section7_results",
+            None
+        )
+
+        if latest_results is not None:
+            available_methods = [
+                "Crash Count"
+            ]
+
+            results_by_metric = {
+                "Crash Count": latest_results
+            }
+
+    if not available_methods:
         st.info(
             "Run Sliding Window Risk Analysis first. Then the threshold/summary "
             "map will appear here."
         )
         return
 
+    c1, c2 = st.columns([0.35, 0.65])
+
+    with c1:
+        score_method = st.selectbox(
+            f"{metric_label} summary metric",
+            available_methods,
+            key=f"{key_prefix}_score_method",
+            help=(
+                "Crash Count and EPDO are the two scoring methods. "
+                "Only methods that have already been run in Sliding Window "
+                "Risk Analysis are shown."
+            )
+        )
+
+    results = results_by_metric.get(
+        score_method,
+        None
+    )
+
+    if results is None:
+        st.info(
+            "No saved sliding-window result is available for the selected "
+            "scoring method."
+        )
+        return
+
     risk_segments = results.get("risk_segments")
+
     if risk_segments is None or getattr(risk_segments, "empty", True):
         st.info("No HIN segment/window results are available yet.")
         return
 
-    final_corridors = st.session_state.get("final_corridors", st.session_state.get("corridors", None))
-    selected_roads = st.session_state.get("selected_roads", None)
-    route_col_s7 = st.session_state.get("section7_route_col_s7", st.session_state.get("route_col", "FULLNAME"))
+    final_corridors = st.session_state.get(
+        "final_corridors",
+        st.session_state.get("corridors", None)
+    )
+
+    selected_roads = st.session_state.get(
+        "selected_roads",
+        None
+    )
+
+    route_col_s7 = st.session_state.get(
+        "section7_route_col_s7",
+        st.session_state.get("route_col", "FULLNAME")
+    )
+
     risk_corridors = results.get("risk_corridors")
 
-    risk_segments = sliding_window_ui._ensure_hin_priority_columns(risk_segments)
-    risk_segments = _ensure_high_risk_score_column(risk_segments)
-    risk_segments_clean = section7_clean_risk_segments(risk_segments, route_col_s7)
-    risk_segments_clean = _ensure_high_risk_score_column(risk_segments_clean)
+    risk_segments = sliding_window_ui._ensure_hin_priority_columns(
+        risk_segments
+    )
+
+    risk_segments = _ensure_high_risk_score_column(
+        risk_segments
+    )
+
+    risk_segments_clean = section7_clean_risk_segments(
+        risk_segments,
+        route_col_s7
+    )
+
+    risk_segments_clean = _ensure_high_risk_score_column(
+        risk_segments_clean
+    )
+
+    if preferred_metric not in risk_segments_clean.columns:
+        st.warning(
+            f"{preferred_metric} is not available in the selected "
+            f"{score_method} result."
+        )
+        return
 
     if risk_corridors is not None:
-        risk_corridors_clean = section7_clean_risk_corridors(risk_corridors, route_col_s7)
+        risk_corridors_clean = section7_clean_risk_corridors(
+            risk_corridors,
+            route_col_s7
+        )
     else:
         risk_corridors_clean = None
 
-    numeric_cols = _hin_summary_metric_options(risk_segments_clean, preferred_metric)
-    if not numeric_cols:
-        st.warning("No numeric HIN fields are available for threshold/summary mapping.")
-        return
+    metric = preferred_metric
 
-    c1, c2 = st.columns([0.35, 0.65])
     with c1:
-        metric = st.selectbox(
-            f"{metric_label} summary metric",
-            numeric_cols,
-            index=0 if preferred_metric not in numeric_cols else numeric_cols.index(preferred_metric),
-            key=f"{key_prefix}_metric",
-        )
         summary_type = st.selectbox(
             f"{metric_label} summary statistic",
             [
@@ -505,12 +595,31 @@ def _render_score_summary_visualization(
             ],
             key=f"{key_prefix}_type_v2",
         )
+
         custom_threshold = None
+
         if summary_type == "Custom threshold":
-            values = pd.to_numeric(risk_segments_clean[metric], errors="coerce")
-            positive_values = values[values > 0]
-            threshold_base = positive_values if not positive_values.empty else values.dropna()
-            default_threshold = float(threshold_base.median()) if not threshold_base.empty else 0.0
+            values = pd.to_numeric(
+                risk_segments_clean[metric],
+                errors="coerce"
+            )
+
+            positive_values = values[
+                values > 0
+            ]
+
+            threshold_base = (
+                positive_values
+                if not positive_values.empty
+                else values.dropna()
+            )
+
+            default_threshold = (
+                float(threshold_base.median())
+                if not threshold_base.empty
+                else 0.0
+            )
+
             custom_threshold = st.number_input(
                 f"Minimum {metric_label} value",
                 value=default_threshold,
@@ -518,11 +627,29 @@ def _render_score_summary_visualization(
                 key=f"{key_prefix}_custom_threshold",
             )
 
+    st.caption(
+        f"{metric_label} summary is based on the {score_method} "
+        "sliding-window run."
+    )
+
     display_segments = risk_segments_clean.copy()
-    metric_values = pd.to_numeric(display_segments[metric], errors="coerce")
+
+    metric_values = pd.to_numeric(
+        display_segments[metric],
+        errors="coerce"
+    )
+
     valid_metric_values = metric_values.dropna()
-    positive_metric_values = valid_metric_values[valid_metric_values > 0]
-    threshold_base = positive_metric_values if not positive_metric_values.empty else valid_metric_values
+
+    positive_metric_values = valid_metric_values[
+        valid_metric_values > 0
+    ]
+
+    threshold_base = (
+        positive_metric_values
+        if not positive_metric_values.empty
+        else valid_metric_values
+    )
 
     filtered, threshold, filter_type = _apply_summary_statistic_filter(
         st=st,
@@ -536,15 +663,20 @@ def _render_score_summary_visualization(
     )
 
     if filter_type == "mask":
-        display_segments = risk_segments_clean[filtered].copy()
+        display_segments = risk_segments_clean[
+            filtered
+        ].copy()
     else:
         display_segments = filtered
 
     if display_segments.empty:
-        st.warning("No HIN segments/windows match the selected summary threshold.")
+        st.warning(
+            "No HIN segments/windows match the selected summary threshold."
+        )
         return
 
     risk_corridors_map = risk_corridors_clean
+
     if (
         display_segments is not None
         and not display_segments.empty
@@ -553,34 +685,67 @@ def _render_score_summary_visualization(
         and "CorridorID" in display_segments.columns
         and "CorridorID" in risk_corridors_clean.columns
     ):
-        selected_corridor_ids = set(display_segments["CorridorID"].astype(str))
+        selected_corridor_ids = set(
+            display_segments["CorridorID"].astype(str)
+        )
+
         risk_corridors_map = risk_corridors_clean[
-            risk_corridors_clean["CorridorID"].astype(str).isin(selected_corridor_ids)
+            risk_corridors_clean["CorridorID"]
+            .astype(str)
+            .isin(selected_corridor_ids)
         ].copy()
 
-    with st.expander(f"{metric_label} summary map color / legend settings", expanded=False):
+    with st.expander(
+        f"{metric_label} summary map color / legend settings",
+        expanded=False
+    ):
         risk_score_symbology = render_numeric_symbology_controls(
             f"{metric_label} summary map",
             key_prefix=f"viz_{key_prefix}_map",
             default_method="Quantile",
         )
 
-    selected_layers = [layer_name]
+    selected_layers = [
+        layer_name
+    ]
+
     fmap = sliding_window_ui._make_segment_comparison_map(
-        original_density=st.session_state.get("section7_original_density", None),
+        original_density=st.session_state.get(
+            "section7_original_density",
+            None
+        ),
         risk_segments=display_segments,
         risk_corridors=risk_corridors_map,
-        crashes=st.session_state.get("section7_crashes_for_map", st.session_state.get("crashes", None)),
+        crashes=st.session_state.get(
+            "section7_crashes_for_map",
+            st.session_state.get("crashes", None)
+        ),
         roads=selected_roads,
-        roads_class=st.session_state.get("roads_class_display", None),
-        signals=st.session_state.get("signals_clean", None),
+        roads_class=st.session_state.get(
+            "roads_class_display",
+            None
+        ),
+        signals=st.session_state.get(
+            "signals_clean",
+            None
+        ),
         corridors=final_corridors,
-        spatial_units=st.session_state.get("spatial_units_density_map", st.session_state.get("spatial_units", None)),
+        spatial_units=st.session_state.get(
+            "spatial_units_density_map",
+            st.session_state.get("spatial_units", None)
+        ),
         selected_layers=selected_layers,
-        crash_density_symbology={"method": "Capped gradient"},
-        original_density_symbology={"method": "Capped gradient"},
+        crash_density_symbology={
+            "method": "Capped gradient"
+        },
+        original_density_symbology={
+            "method": "Capped gradient"
+        },
         risk_score_symbology=risk_score_symbology,
-        crash_color_settings={"enabled": False, "field": None},
+        crash_color_settings={
+            "enabled": False,
+            "field": None
+        },
     )
 
     st_folium(
@@ -589,6 +754,8 @@ def _render_score_summary_visualization(
         width="100%",
         key=(
             f"viz_{key_prefix}_map_"
+            + str(score_method)
+            + "_"
             + str(summary_type)
             + "_"
             + str(metric)
