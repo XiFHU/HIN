@@ -342,7 +342,10 @@ def _apply_summary_statistic_filter(
             f"of positive values ({threshold:.2f})."
         )
 
-    elif summary_type == "IQR high-outlier threshold":
+    elif summary_type in [
+        "IQR high-outlier threshold",
+        "Above IQR high-outlier threshold",
+    ]:
         if not threshold_base.empty:
             q1 = float(threshold_base.quantile(0.25))
             q3 = float(threshold_base.quantile(0.75))
@@ -373,7 +376,10 @@ def _apply_summary_statistic_filter(
                 f"showing {metric} >= 0.00."
             )
 
-    elif summary_type == "IQR low-outlier threshold":
+    elif summary_type in [
+        "IQR low-outlier threshold",
+        "Below IQR low-outlier threshold",
+    ]:
         if not threshold_base.empty:
             q1 = float(threshold_base.quantile(0.25))
             q3 = float(threshold_base.quantile(0.75))
@@ -392,7 +398,10 @@ def _apply_summary_statistic_filter(
                 f"showing {metric} <= 0.00."
             )
 
-    elif summary_type == "Median + 1.5 × IQR threshold":
+    elif summary_type in [
+        "Median + 1.5 × IQR threshold",
+        "Above median + 1.5 × IQR threshold",
+    ]:
         if not threshold_base.empty:
             q1 = float(threshold_base.quantile(0.25))
             q3 = float(threshold_base.quantile(0.75))
@@ -446,78 +455,23 @@ def _render_score_summary_visualization(
 ):
     """Shared threshold/summary map for normalized HIN or raw High Risk Score.
 
-    The user-facing metric dropdown should only show scoring methods:
-    - Crash Count
-    - EPDO
-
-    It should not show raw field names like High_Risk_Score,
-    HIN_Priority_Index, Max_Window_Score, Crash_Count, or EPDO.
+    The selected sliding-window analysis already determines whether the score
+    is Crash Count based or EPDO based, so this map should not show another
+    summary-metric dropdown. It only lets the user choose the summary statistic
+    or threshold applied to the current result.
     """
     globals().update(workflow_context)
     sliding_window_ui.__dict__.update(workflow_context)
 
-    results_by_metric = st.session_state.get(
-        "section7_results_by_metric",
-        {}
-    )
-
-    available_methods = []
-
-    for method in [
-        "Crash Count",
-        "EPDO"
-    ]:
-        if method in results_by_metric:
-            method_results = results_by_metric.get(method)
-
-            if method_results is not None:
-                available_methods.append(method)
-
-    if not available_methods:
-        latest_results = st.session_state.get(
-            "section7_results",
-            None
-        )
-
-        if latest_results is not None:
-            available_methods = [
-                "Crash Count"
-            ]
-
-            results_by_metric = {
-                "Crash Count": latest_results
-            }
-
-    if not available_methods:
-        st.info(
-            "Run Sliding Window Risk Analysis first. Then the threshold/summary "
-            "map will appear here."
-        )
-        return
-
-    c1, c2 = st.columns([0.35, 0.65])
-
-    with c1:
-        score_method = st.selectbox(
-            f"{metric_label} summary metric",
-            available_methods,
-            key=f"{key_prefix}_score_method",
-            help=(
-                "Crash Count and EPDO are the two scoring methods. "
-                "Only methods that have already been run in Sliding Window "
-                "Risk Analysis are shown."
-            )
-        )
-
-    results = results_by_metric.get(
-        score_method,
+    results = st.session_state.get(
+        "section7_results",
         None
     )
 
     if results is None:
         st.info(
-            "No saved sliding-window result is available for the selected "
-            "scoring method."
+            "Run Sliding Window Risk Analysis first. Then the threshold/summary "
+            "map will appear here."
         )
         return
 
@@ -563,8 +517,8 @@ def _render_score_summary_visualization(
 
     if preferred_metric not in risk_segments_clean.columns:
         st.warning(
-            f"{preferred_metric} is not available in the selected "
-            f"{score_method} result."
+            f"{preferred_metric} is not available in the current "
+            "sliding-window result."
         )
         return
 
@@ -578,6 +532,8 @@ def _render_score_summary_visualization(
 
     metric = preferred_metric
 
+    c1, c2 = st.columns([0.35, 0.65])
+
     with c1:
         summary_type = st.selectbox(
             f"{metric_label} summary statistic",
@@ -588,12 +544,12 @@ def _render_score_summary_visualization(
                 "25th percentile",
                 "50th percentile / median",
                 "75th percentile",
-                "IQR high-outlier threshold",
-                "IQR low-outlier threshold",
-                "Median + 1.5 × IQR threshold",
+                "Above IQR high-outlier threshold",
+                "Below IQR low-outlier threshold",
+                "Above median + 1.5 × IQR threshold",
                 "Custom threshold",
             ],
-            key=f"{key_prefix}_type_v2",
+            key=f"{key_prefix}_type_v3",
         )
 
         custom_threshold = None
@@ -628,8 +584,7 @@ def _render_score_summary_visualization(
             )
 
     st.caption(
-        f"{metric_label} summary is based on the {score_method} "
-        "sliding-window run."
+        f"{metric_label} summary uses the current sliding-window analysis result."
     )
 
     display_segments = risk_segments_clean.copy()
@@ -754,8 +709,6 @@ def _render_score_summary_visualization(
         width="100%",
         key=(
             f"viz_{key_prefix}_map_"
-            + str(score_method)
-            + "_"
             + str(summary_type)
             + "_"
             + str(metric)

@@ -206,6 +206,70 @@ def _safe_name(value):
     return re.sub(r"[^a-z0-9]+", "_", str(value).lower()).strip("_") or "data"
 
 
+def _is_corridor_analysis_active(st_obj=st):
+    """Return True only when the active workflow is Corridor analysis."""
+
+    try:
+        values = [
+            st_obj.session_state.get("spatial_unit", ""),
+            st_obj.session_state.get("analysis_type", ""),
+            st_obj.session_state.get("selected_spatial_unit", ""),
+            st_obj.session_state.get("workflow_spatial_unit", ""),
+        ]
+    except Exception:
+        values = []
+
+    return any(
+        str(value).strip().lower() == "corridor"
+        for value in values
+    )
+
+
+def _clean_route_columns_for_dashboard(df):
+    """Keep one route-name column named Route in visible/download tables."""
+
+    if df is None or not hasattr(df, "columns"):
+        return df
+
+    out = df.copy()
+    out = out.loc[:, ~out.columns.duplicated()].copy()
+
+    route_aliases = [
+        "Dashboard_Route_Name",
+        "RouteNameOSM",
+        "Route",
+        "RouteKey",
+        "FULLNAME",
+        "RouteName_Calc",
+        "RouteName",
+        "RoadName",
+        "Road_Name",
+        "name",
+        "Name",
+        "NAME",
+    ]
+
+    route_values = None
+    for col in route_aliases:
+        if col not in out.columns:
+            continue
+        vals = out[col].fillna("").astype(str).str.strip()
+        vals = vals.where(vals != "", None)
+        if vals.notna().any():
+            if route_values is None:
+                route_values = vals
+            else:
+                route_values = route_values.where(route_values.notna(), vals)
+
+    if route_values is not None:
+        out["Route"] = route_values.fillna("Unknown route")
+
+    drop_cols = [c for c in route_aliases if c != "Route" and c in out.columns]
+    out = out.drop(columns=drop_cols, errors="ignore")
+
+    return out
+
+
 def _report_time_text(timezone_name=None):
     """Return report timestamp in the user's selected/local timezone.
 
@@ -227,41 +291,133 @@ def _report_time_text(timezone_name=None):
         return datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
-def _enrich_assigned_crashes(st):
-    """Return assigned crashes with original crash attributes when IDs match.
+def _active_analysis_type(st_obj=st):
+    """Return the active workflow analysis type used by the dashboard."""
+    for key in [
+        "spatial_unit",
+        "analysis_type",
+        "selected_spatial_unit",
+        "workflow_spatial_unit",
+    ]:
+        value = str(st_obj.session_state.get(key, "")).strip().lower()
+        if "intersection" in value:
+            return "intersection"
+        if "corridor" in value:
+            return "corridor"
+        if "segment" in value:
+            return "segment"
+    return "unknown"
 
-    Some workflow tables keep only assignment fields. Dashboard summaries need the
-    original crash type/year/severity/reason fields, so we merge them back when a
-    common crash ID is available. If no match is possible, the assigned table is
-    returned unchanged.
+
+def _dashboard_assigned_crashes(st_obj=st):
+    """Return crashes assigned by the active completed analysis.
+
+    Intersection and corridor dashboards use spatial-unit assigned crashes.
+    Segment dashboards use sliding-window route-assigned crashes after Section 7
+    has run; before that they use segment spatial-unit assigned crashes.
+
+    An empty assignment result is returned as empty and never replaced by all
+    uploaded crashes. This prevents off-road crashes from reappearing in KPI,
+    chart, table, map, and report outputs.
     """
-    assigned = st.session_state.get("assigned_crashes")
+    analysis_type = _active_analysis_type(st_obj)
+    results = st_obj.session_state.get("section7_results")
+
+    section7_has_assignment = (
+        isinstance(results, dict)
+        and "assigned_crashes" in results
+    )
+    section7_assigned = (
+        results.get("assigned_crashes")
+        if section7_has_assignment
+        else None
+    )
+    spatial_assigned = st_obj.session_state.get("assigned_crashes")
+
+    if analysis_type in ["intersection", "corridor"]:
+        return spatial_assigned
+
+    if analysis_type == "segment":
+        if section7_has_assignment:
+            return section7_assigned
+        return spatial_assigned
+
+    # Conservative fallback when the active type is not recorded correctly.
+    # A completed sliding-window result is more specific than the uploaded data.
+    if section7_has_assignment:
+        return section7_assigned
+    return spatial_assigned
+
+
+def _enrich_assigned_crashes(st):
+    """Return active assigned crashes with original crash attributes when possible."""
+    assigned = _dashboard_assigned_crashes(st)
     crashes = st.session_state.get("crashes")
+
     if assigned is None:
         return None
+
     assigned_df = _drop_geometry(assigned).copy()
-    if crashes is None:
+    if crashes is None or assigned_df.empty:
         return assigned_df
+
     crash_df = _drop_geometry(crashes).copy()
-    candidates = ["CrashID", "SourceCrashID", "CRASH_ID", "OBJECTID", "CaseID", "CrashNumber"]
+    candidates = [
+        "__S7_UniqueCrashID",
+        "CrashID_S7",
+        "DashboardCrashID",
+        "SourceCrashID",
+        "CrashID",
+        "CrashId",
+        "crash_id",
+        "CRASH_ID",
+        "Crash_ID",
+        "st_case",
+        "ST_CASE",
+        "OBJECTID",
+        "CaseID",
+        "case_id",
+        "CrashNumber",
+    ]
+
     for key in candidates:
-        if key in assigned_df.columns and key in crash_df.columns:
-            add_cols = [c for c in crash_df.columns if c not in assigned_df.columns or c == key]
-            try:
-                return assigned_df.merge(crash_df[add_cols], on=key, how="left", suffixes=("", "_src"))
-            except Exception:
-                return assigned_df
+        if key not in assigned_df.columns or key not in crash_df.columns:
+            continue
+
+        add_cols = [
+            c for c in crash_df.columns
+            if c not in assigned_df.columns or c == key
+        ]
+        source = crash_df[add_cols].copy()
+
+        # Keep one source row per crash ID so enrichment cannot multiply the
+        # number of assigned crashes shown by the dashboard.
+        source = source.drop_duplicates(subset=[key], keep="first")
+
+        try:
+            return assigned_df.merge(
+                source,
+                on=key,
+                how="left",
+                suffixes=("", "_src"),
+                validate="many_to_one",
+            )
+        except Exception:
+            return assigned_df
+
     return assigned_df
+
 
 def _available_tables(st):
     tables = {}
-
-    if st.session_state.get("crashes") is not None:
-        tables["Uploaded crashes"] = _drop_geometry(st.session_state["crashes"])
+    is_corridor_analysis = _is_corridor_analysis_active(st)
 
     assigned_enriched = _enrich_assigned_crashes(st)
     if assigned_enriched is not None:
         tables["Assigned crashes"] = assigned_enriched
+    elif st.session_state.get("crashes") is not None:
+        # Uploaded crashes are used only before any assignment result exists.
+        tables["Uploaded crashes"] = _drop_geometry(st.session_state["crashes"])
 
     if st.session_state.get("spatial_units_density_map") is not None:
         tables["Crash density results"] = _drop_geometry(st.session_state["spatial_units_density_map"])
@@ -272,19 +428,31 @@ def _available_tables(st):
     if st.session_state.get("section7_results") is not None:
         results = st.session_state["section7_results"]
         if results.get("risk_segments") is not None:
-            tables["HIN risk segments"] = _drop_geometry(results["risk_segments"])
+            tables["HIN risk segments"] = _clean_route_columns_for_dashboard(
+                _drop_geometry(results["risk_segments"])
+            )
         if results.get("risk_windows") is not None:
-            tables["Sliding windows"] = _drop_geometry(results["risk_windows"])
-        if results.get("risk_corridors") is not None:
-            tables["HIN corridors"] = _drop_geometry(results["risk_corridors"])
+            tables["Sliding windows"] = _clean_route_columns_for_dashboard(
+                _drop_geometry(results["risk_windows"])
+            )
+        if is_corridor_analysis and results.get("risk_corridors") is not None:
+            tables["HIN corridors"] = _clean_route_columns_for_dashboard(
+                _drop_geometry(results["risk_corridors"])
+            )
         if results.get("route_summary") is not None:
-            tables["Sliding-window route summary"] = _drop_geometry(results["route_summary"])
+            tables["Sliding-window route summary"] = _clean_route_columns_for_dashboard(
+                _drop_geometry(results["route_summary"])
+            )
 
-    if st.session_state.get("corridors") is not None:
-        tables["Generated corridors"] = _drop_geometry(st.session_state["corridors"])
+    if is_corridor_analysis and st.session_state.get("corridors") is not None:
+        tables["Generated corridors"] = _clean_route_columns_for_dashboard(
+            _drop_geometry(st.session_state["corridors"])
+        )
 
-    if st.session_state.get("final_corridors") is not None:
-        tables["Filtered corridors"] = _drop_geometry(st.session_state["final_corridors"])
+    if is_corridor_analysis and st.session_state.get("final_corridors") is not None:
+        tables["Filtered corridors"] = _clean_route_columns_for_dashboard(
+            _drop_geometry(st.session_state["final_corridors"])
+        )
 
     return {
         name: table
@@ -1679,13 +1847,16 @@ def _style_feature(value, min_value, max_value, highlight=False):
 
 
 def _workflow_overlay_sources(st):
-    """Return optional workflow layers that can be shown on dashboard maps."""
+    """Return dashboard map overlays for the active analysis.
+
+    Crash points are limited to the active assigned-crash result. The complete
+    uploaded crash layer is intentionally not exposed after assignment.
+    """
     sources = {}
     for label, state_key in [
         ("Roads", "selected_roads"),
         ("Road class layer", "roads_class_display"),
         ("Signals", "signals_clean"),
-        ("Crash points", "crashes"),
         ("Corridors", "final_corridors"),
         ("Generated corridors", "corridors"),
         ("Study boundary", "selected_boundary"),
@@ -1693,9 +1864,11 @@ def _workflow_overlay_sources(st):
         data = st.session_state.get(state_key)
         if data is not None and not getattr(data, "empty", True):
             sources[label] = data
-    # Avoid duplicate corridor choices when final_corridors and corridors are the same purpose.
-    if "Corridors" in sources and "Generated corridors" in sources:
-        pass
+
+    assigned = _dashboard_assigned_crashes(st)
+    if assigned is not None and not getattr(assigned, "empty", True):
+        sources["Assigned crash points"] = assigned
+
     return sources
 
 
@@ -2488,7 +2661,7 @@ def _render_dashboard_builder(st, tables):
 
     if include_tables:
         table_name = st.selectbox("Dashboard table preview", list(tables.keys()), key="dash_builder_table_preview")
-        df = tables[table_name].copy()
+        df = _clean_route_columns_for_dashboard(tables[table_name].copy())
         metric = _default_metric(_numeric_cols(df))
         st.dataframe(_safe_dataframe_for_display(_rank_table(df, metric).head(50)), width="stretch", hide_index=True)
 
@@ -2506,9 +2679,8 @@ def _render_sliding_window_route_summary_table(st, tables):
         unsafe_allow_html=True,
     )
 
-    display = route_summary.copy()
+    display = _clean_route_columns_for_dashboard(route_summary.copy())
     preferred_cols = [
-        "Dashboard_Route_Name",
         "Route",
         "Route_Length_Miles",
         "Window_Count",
@@ -5365,6 +5537,34 @@ def _selected_hin_subset(hin, metric, method, top_percent=10.0, top_n=20, index_
     if method == "Above median HIN index":
         med = pd.to_numeric(sorted_work[metric], errors="coerce").median()
         return sorted_work[sorted_work[metric] >= med].copy()
+    if method in ["Above IQR high-outlier threshold", "IQR high-outlier threshold"]:
+        values = pd.to_numeric(sorted_work[metric], errors="coerce").dropna()
+        if values.empty:
+            return sorted_work.iloc[0:0].copy()
+        q1 = float(values.quantile(0.25))
+        q3 = float(values.quantile(0.75))
+        iqr = q3 - q1
+        threshold = q3 + 1.5 * iqr
+        return sorted_work[sorted_work[metric] >= threshold].copy()
+    if method in ["Below IQR low-outlier threshold", "IQR low-outlier threshold"]:
+        values = pd.to_numeric(sorted_work[metric], errors="coerce").dropna()
+        if values.empty:
+            return sorted_work.iloc[0:0].copy()
+        q1 = float(values.quantile(0.25))
+        q3 = float(values.quantile(0.75))
+        iqr = q3 - q1
+        threshold = q1 - 1.5 * iqr
+        return sorted_work[sorted_work[metric] <= threshold].copy()
+    if method in ["Above median + 1.5 × IQR threshold", "Median + 1.5 × IQR threshold"]:
+        values = pd.to_numeric(sorted_work[metric], errors="coerce").dropna()
+        if values.empty:
+            return sorted_work.iloc[0:0].copy()
+        q1 = float(values.quantile(0.25))
+        q3 = float(values.quantile(0.75))
+        median_value = float(values.median())
+        iqr = q3 - q1
+        threshold = median_value + 1.5 * iqr
+        return sorted_work[sorted_work[metric] >= threshold].copy()
     return sorted_work.head(20).copy()
 
 
@@ -7291,38 +7491,35 @@ def _dashboard_hin_source_gdf(hin=None):
 
 
 def _dashboard_crashes_source_gdf(crashes=None):
-    """Return crash GeoDataFrame for HIN dashboard counting.
+    """Return the active assigned crash GeoDataFrame for dashboard counting.
 
-    Prefer the sliding-window assigned crashes because they are the exact crash
-    records used by the HIN workflow. Fall back to other existing crash tables.
+    Once an assignment result exists, the full uploaded crash dataset is never
+    used as a fallback. This keeps HIN summaries, KSI calculations, map points,
+    and rate calculations aligned with the crashes actually used by the active
+    spatial-unit or sliding-window analysis.
     """
-    candidates = []
-    try:
-        results = st.session_state.get("section7_results") or {}
-        candidates.append(results.get("assigned_crashes"))
-    except Exception:
-        pass
-    try:
-        candidates.append(st.session_state.get("section7_crashes_for_map"))
-    except Exception:
-        pass
-    try:
-        candidates.append(st.session_state.get("assigned_crashes"))
-    except Exception:
-        pass
-    try:
-        candidates.append(st.session_state.get("crashes"))
-    except Exception:
-        pass
-    candidates.append(crashes)
+    assigned = _dashboard_assigned_crashes(st)
 
-    for cand in candidates:
+    # Preserve an empty assignment as an empty result instead of replacing it
+    # with all uploaded crashes.
+    if assigned is not None:
         try:
-            if cand is not None and not getattr(cand, "empty", True) and "geometry" in cand.columns:
-                return cand.copy()
+            if "geometry" in assigned.columns:
+                return assigned.copy()
         except Exception:
-            pass
-    return crashes.copy() if crashes is not None else pd.DataFrame()
+            return pd.DataFrame()
+        return pd.DataFrame()
+
+    # Before any assignment has run, use the caller-provided crash layer when it
+    # contains geometry. This supports pre-analysis previews without affecting
+    # completed workflow summaries.
+    try:
+        if crashes is not None and "geometry" in crashes.columns:
+            return crashes.copy()
+    except Exception:
+        pass
+
+    return pd.DataFrame()
 
 
 def _strict_hin_ksi_series(df):
@@ -8167,9 +8364,12 @@ def _render_hin_network_summary(st, hin, crashes):
             "HIN index threshold",
             "Above average HIN index",
             "Above median HIN index",
+            "Above IQR high-outlier threshold",
+            "Below IQR low-outlier threshold",
+            "Above median + 1.5 × IQR threshold",
         ],
         index=0,
-        key="hin_summary_threshold_mode_v43",
+        key="hin_summary_threshold_mode_v44",
     )
 
     top_percent = 10.0
@@ -8184,7 +8384,7 @@ def _render_hin_network_summary(st, hin, crashes):
                 max_value=100.0,
                 value=float(st.session_state.get("hin_summary_top_percent", 10.0)),
                 step=1.0,
-                key="hin_summary_top_percent_v43",
+                key="hin_summary_top_percent_v44",
             )
         elif method == "Top number of segments/windows":
             top_n = st.number_input(
@@ -8193,7 +8393,7 @@ def _render_hin_network_summary(st, hin, crashes):
                 max_value=max(int(len(work)), 1),
                 value=min(20, max(int(len(work)), 1)),
                 step=1,
-                key="hin_summary_top_n_v43",
+                key="hin_summary_top_n_v44",
             )
         elif method == "HIN index threshold":
             index_threshold = st.number_input(
@@ -8202,12 +8402,32 @@ def _render_hin_network_summary(st, hin, crashes):
                 max_value=100.0,
                 value=float(st.session_state.get("hin_summary_index_threshold", 50.0)),
                 step=5.0,
-                key="hin_summary_index_threshold_v43",
+                key="hin_summary_index_threshold_v44",
             )
         elif method == "Above average HIN index":
             st.metric("Average", f"{work[metric].mean():,.2f}")
         elif method == "Above median HIN index":
             st.metric("Median", f"{work[metric].median():,.2f}")
+        elif method in [
+            "Above IQR high-outlier threshold",
+            "Below IQR low-outlier threshold",
+            "Above median + 1.5 × IQR threshold",
+        ]:
+            values = pd.to_numeric(work[metric], errors="coerce").dropna()
+            if values.empty:
+                st.metric("IQR threshold", "N/A")
+            else:
+                q1 = float(values.quantile(0.25))
+                q3 = float(values.quantile(0.75))
+                iqr = q3 - q1
+                median_value = float(values.median())
+                if method == "Below IQR low-outlier threshold":
+                    threshold_value = q1 - 1.5 * iqr
+                elif method == "Above median + 1.5 × IQR threshold":
+                    threshold_value = median_value + 1.5 * iqr
+                else:
+                    threshold_value = q3 + 1.5 * iqr
+                st.metric("IQR threshold", f"{threshold_value:,.2f}")
 
     selected = _selected_hin_subset(
         work,
@@ -8237,28 +8457,53 @@ def _render_hin_network_summary(st, hin, crashes):
     c_crashes.metric("Crashes on selected HIN", f"{high_crashes:,}", f"{pct_crash:,.1f}% of assigned sliding-window crashes")
     c_ksi.metric("KSI (K+A) on selected HIN", f"{high_ksi:,}", f"{pct_ksi:,.1f}% of KSI (K+A)")
 
-    with st.expander("Selected HIN summary rows", expanded=False):
-        selected_display = _add_dashboard_rate_columns(selected, crashes=assigned)
-        preview_cols = []
-        for c in [
-            _normal_col(selected_display, ["RiskSegmentID", "WindowID", "SlidingWindowID", "SegmentID", "UnitID", "CorridorID"]),
-            _dashboard_route_col(selected_display),
-            _dashboard_length_col(selected_display),
-            _normal_col(selected_display, ["Win_Start_M", "FromMile", "From_Mile", "WindowFromMile", "Win_From_Mi"]),
-            _normal_col(selected_display, ["Win_End_M", "ToMile", "To_Mile", "WindowToMile", "Win_To_Mi"]),
-            "Dashboard_Crash_Count",
-            "KSI_Crashes_Dashboard",
-            metric,
-            "Crash_per_Mile_per_Year",
-            "KSI_per_Mile_per_Year",
-            "Dashboard_Analysis_Years",
-        ]:
-            if c and c in selected_display.columns and c not in preview_cols:
-                preview_cols.append(c)
-        if preview_cols:
-            st.dataframe(_safe_dataframe_for_display(selected_display[preview_cols].head(50)), width="stretch", hide_index=True)
+    with st.expander("Sliding-window route summary", expanded=True):
+        results_for_summary = _section7_results_for_dashboard()
+        route_summary = results_for_summary.get("route_summary")
+
+        if route_summary is None or getattr(route_summary, "empty", True):
+            st.info("No sliding-window route summary is available yet.")
         else:
-            st.info("No displayable HIN rows are available for the selected threshold.")
+            route_display = _clean_route_columns_for_dashboard(
+                _drop_geometry(route_summary)
+            )
+
+            preferred_cols = [
+                "Route",
+                "Route_Length_Miles",
+                "Window_Count",
+                "Assigned_Crash_Count",
+                "Assigned_EPDO",
+                "Max_Window_Crash_Count",
+                "Max_Window_EPDO",
+                "Max_High_Risk_Score",
+                "Max_HIN_Priority_Index",
+            ]
+            cols = [
+                col for col in preferred_cols
+                if col in route_display.columns
+            ]
+            if cols:
+                route_display = route_display[cols].copy()
+
+            for col in [
+                "Route_Length_Miles",
+                "Assigned_EPDO",
+                "Max_Window_EPDO",
+                "Max_High_Risk_Score",
+                "Max_HIN_Priority_Index",
+            ]:
+                if col in route_display.columns:
+                    route_display[col] = pd.to_numeric(
+                        route_display[col],
+                        errors="coerce"
+                    ).round(3)
+
+            st.dataframe(
+                _safe_dataframe_for_display(route_display),
+                width="stretch",
+                hide_index=True,
+            )
 
     years = _dashboard_year_count(assigned)
     st.caption(

@@ -1,0 +1,15 @@
+Route,Route_Normalized,SignalCnt,SignalRowCnt,ExactMatchRoadCnt,RoadCnt,Method
+East Mineral Avenue,E MINERAL AVE,3,3,19,19,complete normalized road name match
+South Broadway,S BROADWAY,16,16,77,77,complete normalized road name match
+South Federal Boulevard,S FEDERAL BLVD,3,3,14,14,complete normalized road name match
+South Lowell Boulevard,S LOWELL BLVD,4,4,30,30,complete normalized road name match
+South Prince Street,S PRINCE ST,4,4,98,98,complete normalized road name match
+South Santa Fe Drive,S SANTA FE DR,12,12,76,76,complete normalized road name match
+South Windermere Street,S WINDERMERE ST,4,4,94,94,complete normalized road name match
+West Belleview Avenue,W BELLEVIEW AVE,7,7,55,55,complete normalized road name match
+West Berry Avenue,W BERRY AVE,4,4,64,64,complete normalized road name match
+West Bowles Avenue,W BOWLES AVE,7,7,43,43,complete normalized road name match
+West County Line Road,W COUNTY LINE RD,5,5,32,32,complete normalized road name match
+West Littleton Boulevard,W LITTLETON BLVD,5,5,52,52,complete normalized road name match
+West Main Street,W MAIN ST,3,3,4,4,complete normalized road name match
+West Mineral Avenue,W MINERAL AVE,9,9,48,48,complete normalized road name match

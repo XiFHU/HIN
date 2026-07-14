@@ -7,6 +7,77 @@ import folium
 from modules.crash_density import resolve_crash_id_col
 from shapely.ops import substring, linemerge, unary_union
 
+
+ROUTE_ALIAS_COLUMNS = [
+    "Dashboard_Route_Name",
+    "RouteNameOSM",
+    "RouteKey",
+    "Route",
+    "FULLNAME",
+    "RouteName_Calc",
+    "RouteName",
+    "RoadName",
+    "Road_Name",
+    "name",
+    "Name",
+    "NAME",
+]
+
+
+def collapse_route_alias_columns(df):
+    """Keep one user-facing route-name column named Route.
+
+    Internal route aliases can exist while calculating, but output/download
+    tables should not repeat the same route name under several fields.
+    """
+
+    if df is None or not hasattr(df, "columns"):
+        return df
+
+    out = df.copy()
+    out = out.loc[
+        :,
+        ~out.columns.duplicated()
+    ].copy()
+
+    route_values = None
+
+    for col in ROUTE_ALIAS_COLUMNS:
+        if col not in out.columns:
+            continue
+
+        vals = (
+            out[col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        vals = vals.where(vals != "", None)
+
+        if vals.notna().any():
+            if route_values is None:
+                route_values = vals
+            else:
+                route_values = route_values.where(
+                    route_values.notna(),
+                    vals
+                )
+
+    if route_values is not None:
+        out["Route"] = route_values.fillna("Unknown route")
+
+    drop_cols = [
+        col for col in ROUTE_ALIAS_COLUMNS
+        if col != "Route" and col in out.columns
+    ]
+
+    out = out.drop(
+        columns=drop_cols,
+        errors="ignore"
+    )
+
+    return out
+
 def section7_clean_risk_segments(
     risk_segments,
     route_col
@@ -143,6 +214,10 @@ def clean_section7_output_gdf(
         gdf_clean[col] = col_data.map(
             _safe_to_text
         )
+
+    gdf_clean = collapse_route_alias_columns(
+        gdf_clean
+    )
 
     return gdf_clean
 
@@ -1032,8 +1107,7 @@ def build_sliding_window_route_summary(
 
         rows.append(
             {
-                "Route": route_name_text,
-                "Dashboard_Route_Name": display_route,
+                "Route": display_route,
                 "Route_Length_Miles": float(route_length_mi or 0.0),
                 "Window_Count": int(len(route_windows)),
                 "Assigned_Crash_Count": int(assigned_crash_count),
@@ -1053,7 +1127,7 @@ def build_sliding_window_route_summary(
                 "Max_High_Risk_Score",
                 "Max_Window_Crash_Count",
                 "Max_Window_EPDO",
-                "Dashboard_Route_Name",
+                "Route",
             ],
             ascending=[False, False, False, True],
         ).reset_index(drop=True)

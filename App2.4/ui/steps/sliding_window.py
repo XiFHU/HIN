@@ -21,6 +21,51 @@ def _mapped_crash_id_col(df):
     return resolve_crash_id_col(df)
 
 
+def _clean_route_columns_for_output_table(df):
+    """Keep one visible/download route-name column named Route."""
+
+    if df is None or not hasattr(df, "columns"):
+        return df
+
+    out = df.copy()
+    out = out.loc[:, ~out.columns.duplicated()].copy()
+
+    route_aliases = [
+        "Dashboard_Route_Name",
+        "RouteNameOSM",
+        "Route",
+        "RouteKey",
+        "FULLNAME",
+        "RouteName_Calc",
+        "RouteName",
+        "RoadName",
+        "Road_Name",
+        "name",
+        "Name",
+        "NAME",
+    ]
+
+    route_values = None
+    for col in route_aliases:
+        if col not in out.columns:
+            continue
+        vals = out[col].fillna("").astype(str).str.strip()
+        vals = vals.where(vals != "", None)
+        if vals.notna().any():
+            if route_values is None:
+                route_values = vals
+            else:
+                route_values = route_values.where(route_values.notna(), vals)
+
+    if route_values is not None:
+        out["Route"] = route_values.fillna("Unknown route")
+
+    drop_cols = [c for c in route_aliases if c != "Route" and c in out.columns]
+    out = out.drop(columns=drop_cols, errors="ignore")
+
+    return out
+
+
 
 
 def _route_name_column_options_for_s7(roads_df):
@@ -1513,9 +1558,19 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                 route_col_s7
             )
 
-            seg_table = risk_segments_clean.drop(
-                columns="geometry",
-                errors="ignore"
+            risk_segments_clean = _clean_route_columns_for_output_table(
+                risk_segments_clean
+            )
+
+            route_summary = _clean_route_columns_for_output_table(
+                route_summary
+            )
+
+            seg_table = _clean_route_columns_for_output_table(
+                risk_segments_clean.drop(
+                    columns="geometry",
+                    errors="ignore"
+                )
             )
 
             if "HIN_Priority_Index" in seg_table.columns:
@@ -1550,7 +1605,7 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                 st.markdown("**HIN risk results**")
             with dl_col2:
                 if hasattr(st, "popover"):
-                    download_menu = st.popover("☰", use_container_width=False)
+                    download_menu = st.popover("☰", width="content")
                 else:
                     download_menu = st.expander("☰", expanded=False)
 
@@ -1578,7 +1633,9 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                     if route_summary is not None and not route_summary.empty:
                         st.download_button(
                             "Route Summary CSV",
-                            data=df_to_csv_bytes(route_summary),
+                            data=df_to_csv_bytes(
+                                _clean_route_columns_for_output_table(route_summary)
+                            ),
                             file_name="hin_route_summary.csv",
                             mime="text/csv",
                             key="section7_download_route_summary_csv"
@@ -1601,8 +1658,8 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
             if route_summary is not None and not route_summary.empty:
                 with st.expander("Sliding-window route summary", expanded=True):
                     st.dataframe(
-                        route_summary,
-                        use_container_width=True,
+                        _clean_route_columns_for_output_table(route_summary),
+                        width="stretch",
                         hide_index=True
                     )
 
