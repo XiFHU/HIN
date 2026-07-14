@@ -2748,7 +2748,7 @@ def render_dashboard_page(st):
 
     with tab_insights:
         _render_pattern_charts(st, tables)
-        _render_sliding_window_route_summary_table(st, tables)
+        # Route summary is shown inside the HIN summary only; avoid duplicate table.
 
     with tab_builder:
         _render_dashboard_builder(st, tables)
@@ -9330,3 +9330,969 @@ def _render_dashboard_builder(st, tables):
             st.dataframe(_safe_dataframe_for_display(compact_tables[table_name]).head(25), width="stretch", hide_index=True)
         else:
             st.info("No report-ready result tables are available yet.")
+
+
+# --- V17 report/dashboard cleanup requested July 2026 -----------------------
+# Display/export-only changes. Analysis and crash assignment are unchanged.
+
+_report_tables_before_v17 = _report_tables
+_build_default_figures_before_v17 = _build_default_figures
+
+
+def _active_workflow_type_for_report(st_obj=st):
+    """Resolve the active workflow without allowing stale analysis labels."""
+    values = [
+        st_obj.session_state.get("spatial_unit", ""),
+        st_obj.session_state.get("analysis_type", ""),
+        st_obj.session_state.get("selected_spatial_unit", ""),
+        st_obj.session_state.get("workflow_spatial_unit", ""),
+        st_obj.session_state.get("spatial_unit_selector", ""),
+    ]
+    for target in ["intersection", "corridor", "segment"]:
+        if any(target in str(v).strip().lower() for v in values):
+            return target
+    return "unknown"
+
+
+def _available_maps(st):
+    """Return active-workflow maps with both count and density spatial-unit views."""
+    maps = {}
+    workflow = _active_workflow_type_for_report(st)
+    density = st.session_state.get("spatial_units_density_map")
+
+    if density is not None and not getattr(density, "empty", True):
+        unit_map = _repair_gdf_crs(density, st)
+        # Both views use the same spatial-unit geometry but force different metrics
+        # through the map name and _metric_for_map().
+        maps["Crash count map"] = unit_map
+        maps["Crash density map"] = unit_map
+
+    if workflow == "segment":
+        results = st.session_state.get("section7_results")
+        risk_segments = results.get("risk_segments") if isinstance(results, dict) else None
+        if risk_segments is not None and not getattr(risk_segments, "empty", True):
+            hin_map = _repair_gdf_crs(risk_segments, st)
+            maps["HIN priority map"] = hin_map
+            metric = _dashboard_hin_metric(hin_map)
+            if metric:
+                work = hin_map.copy()
+                work[metric] = pd.to_numeric(work[metric], errors="coerce").fillna(0)
+                maps["HIN above average map"] = work[work[metric] >= work[metric].mean()].copy()
+                maps["HIN above median map"] = work[work[metric] >= work[metric].median()].copy()
+
+    return {k: v for k, v in maps.items() if v is not None and not getattr(v, "empty", True)}
+
+
+def _hin_threshold_report_table(tables):
+    """Save the five requested HIN statistical threshold results for reports."""
+    hin = tables.get("HIN risk segments", tables.get("Sliding windows"))
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    work = _prepare_window_dashboard_table(hin, crashes=crashes)
+    if work is None or getattr(work, "empty", True):
+        return pd.DataFrame()
+    metric = "HIN_Priority_Index" if "HIN_Priority_Index" in work.columns else _dashboard_hin_metric(work)
+    if not metric or metric not in work.columns:
+        return pd.DataFrame()
+
+    vals = pd.to_numeric(work[metric], errors="coerce").dropna()
+    if vals.empty:
+        return pd.DataFrame()
+    q1 = float(vals.quantile(0.25)); q3 = float(vals.quantile(0.75))
+    iqr = q3 - q1; mean = float(vals.mean()); median = float(vals.median())
+    definitions = [
+        ("Above average HIN index", mean, ">="),
+        ("Above median HIN index", median, ">="),
+        ("Above IQR high-outlier threshold", q3 + 1.5 * iqr, ">="),
+        ("Below IQR low-outlier threshold", q1 - 1.5 * iqr, "<="),
+        ("Above median + 1.5 × IQR threshold", median + 1.5 * iqr, ">="),
+    ]
+    length_col = _dashboard_length_col(work)
+    if length_col:
+        work[length_col] = pd.to_numeric(work[length_col], errors="coerce").fillna(0)
+    assigned = _section7_assigned_crashes_for_dashboard(crashes)
+    total_crashes = _safe_unique_crash_count(assigned)
+    total_ksi = _total_ka_from_crashes(assigned)
+    rows = []
+    for label, threshold, op in definitions:
+        selected = work[work[metric] <= threshold].copy() if op == "<=" else work[work[metric] >= threshold].copy()
+        crash_subset, _ = _selected_hin_crash_subset(selected, assigned)
+        n_crashes = _safe_unique_crash_count(crash_subset)
+        n_ksi = _total_ka_from_crashes(crash_subset)
+        rows.append({
+            "Threshold method": label,
+            "Threshold value": round(float(threshold), 3),
+            "Selected segments/windows": int(len(selected)),
+            "Selected miles": round(float(pd.to_numeric(selected[length_col], errors="coerce").fillna(0).sum()), 3) if length_col else None,
+            "Assigned crashes captured": int(n_crashes),
+            "Crash capture (%)": round(n_crashes / total_crashes * 100, 2) if total_crashes else 0.0,
+            "KSI (K+A) captured": int(n_ksi),
+            "KSI capture (%)": round(n_ksi / total_ksi * 100, 2) if total_ksi else 0.0,
+        })
+    return pd.DataFrame(rows)
+
+
+def _clean_route_hin_summary_for_report(df):
+    """Keep one AvgHIN and one MedianHIN column in report-only route tables.
+
+    AvgHIN and MedianHIN are explicitly preferred over generic aliases such as
+    mean, average, and median. This function only cleans the copy used by the
+    report; it does not modify the dashboard tables or workflow result data.
+    """
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame()
+
+    out = _safe_dataframe_for_display(_drop_geometry(df)).copy()
+    out = out.loc[:, ~out.columns.duplicated()].copy()
+
+    def _normalized_column_map(columns):
+        result = {}
+        for col in columns:
+            key = str(col).strip().lower().replace("_", "").replace(" ", "")
+            if key not in result:
+                result[key] = col
+        return result
+
+    normalized = _normalized_column_map(out.columns)
+
+    # Explicit priority: retain AvgHIN and MedianHIN when they exist.
+    avg_priority = [
+        "avghin",
+        "avghinindex",
+        "averagehin",
+        "averagehinindex",
+        "average",
+        "mean",
+    ]
+    median_priority = [
+        "medianhin",
+        "medianhinindex",
+        "median",
+    ]
+
+    avg_source = next(
+        (normalized[key] for key in avg_priority if key in normalized),
+        None,
+    )
+    median_source = next(
+        (normalized[key] for key in median_priority if key in normalized),
+        None,
+    )
+
+    if avg_source is not None:
+        out["AvgHIN"] = pd.to_numeric(out[avg_source], errors="coerce")
+
+    if median_source is not None:
+        out["MedianHIN"] = pd.to_numeric(out[median_source], errors="coerce")
+
+    average_aliases = {
+        "avghin",
+        "avghinindex",
+        "averagehin",
+        "averagehinindex",
+        "average",
+        "mean",
+    }
+    median_aliases = {
+        "medianhin",
+        "medianhinindex",
+        "median",
+    }
+
+    drop_cols = []
+    for col in out.columns:
+        normalized_name = str(col).strip().lower().replace("_", "").replace(" ", "")
+        if normalized_name in average_aliases and col != "AvgHIN":
+            drop_cols.append(col)
+        elif normalized_name in median_aliases and col != "MedianHIN":
+            drop_cols.append(col)
+
+    out = out.drop(columns=drop_cols, errors="ignore")
+
+    # Keep all non-HIN context columns and exactly one average/median pair.
+    ordered = [c for c in out.columns if c not in ["AvgHIN", "MedianHIN"]]
+    if "AvgHIN" in out.columns:
+        ordered.append("AvgHIN")
+    if "MedianHIN" in out.columns:
+        ordered.append("MedianHIN")
+
+    return out[ordered]
+
+
+def _clean_ksi_summary_report_table(df):
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame()
+    out = df.copy()
+    for c in ["UnitType", "City"]:
+        if c in out.columns:
+            out[c] = out[c].fillna("").astype(str).replace({"nan": "", "None": ""})
+    for c in ["CrashCount", "CrashDensity"]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+    # Drop fully blank optional context columns instead of exporting NaN columns.
+    for c in ["UnitType", "City"]:
+        if c in out.columns and out[c].astype(str).str.strip().eq("").all():
+            out = out.drop(columns=[c])
+    return out
+
+
+def _report_tables(tables, top_n=20):
+    out = dict(_report_tables_before_v17(tables, top_n=top_n))
+    workflow = _active_workflow_type_for_report(st)
+
+    if "KSI summary by spatial unit" in out:
+        out["KSI summary by spatial unit"] = _clean_ksi_summary_report_table(out["KSI summary by spatial unit"])
+
+    if workflow == "segment":
+        # Remove report-only tables the user no longer wants.
+        for name in list(out):
+            low = name.lower()
+            if "top hin" in low or ("ksi" in low and "hin index" in low):
+                out.pop(name, None)
+
+        thresholds = _hin_threshold_report_table(tables)
+        if not thresholds.empty:
+            out["HIN statistical threshold results"] = thresholds
+
+        route_summary = tables.get("Sliding-window route summary")
+        if route_summary is not None and not getattr(route_summary, "empty", True):
+            out["Sliding-window route summary"] = _safe_dataframe_for_display(_drop_geometry(route_summary))
+
+        # Clean any average/median route table that may be added by later builds.
+        for name in list(out):
+            low = name.lower()
+            if "route" in low and ("average" in low or "median" in low or "hin" in low):
+                out[name] = _clean_route_hin_summary_for_report(out[name])
+
+    return {k: v for k, v in out.items() if v is not None and not getattr(v, "empty", True)}
+
+
+def _report_figures_filtered(tables, extra_figures=None):
+    figures = _build_default_figures_before_v17(tables) + (extra_figures or [])
+    if _active_workflow_type_for_report(st) == "segment":
+        blocked = ["top hin segments/windows", "k+a crashes vs hin", "ksi (k+a) crashes vs hin"]
+        figures = [item for item in figures if not any(b in str(item[0]).lower() for b in blocked)]
+    return figures
+
+
+def _export_dashboard_docx(tables, selected_blocks, selected_maps, extra_figures=None, maps=None, overlay_layers=None, report_timezone=None):
+    """Workflow-correct Word report with requested HIN thresholds and tables."""
+    if Document is None:
+        return None
+    doc = Document()
+    title = _report_title(tables)
+    doc.add_heading(title, level=0)
+    doc.add_paragraph(f"Generated: {_report_time_text(report_timezone)}")
+    doc.add_paragraph(f"User email: {_report_user_email()}")
+    doc.add_heading("Introduction", level=1)
+    doc.add_paragraph(_report_introduction_text(tables))
+
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    _add_data_section(doc, tables, crashes)
+    _add_methodology_section(doc, tables)
+    _add_limitations_section(doc)
+
+    doc.add_heading("Results and visualization", level=1)
+    doc.add_heading("Crash summary", level=2)
+    _add_key_value_table(doc, [(k, _format_kpi_value(v)) for k, v in _summary_kpi_values(crashes).items()])
+
+    figures = _report_figures_filtered(tables, extra_figures=extra_figures)
+    _add_bubble_size_note_if_needed(doc, figures)
+    for fig_title, fig, data in figures:
+        if selected_blocks and fig_title not in selected_blocks:
+            continue
+        doc.add_heading(str(fig_title), level=2)
+        img = _figure_to_png_bytes(_polish_figure(fig))
+        if img:
+            doc.add_picture(io.BytesIO(img), width=Inches(6.5))
+        table_df = _safe_dataframe_for_display(data.copy())
+        if not table_df.empty:
+            doc.add_paragraph("Summary table")
+            _add_dataframe_table(doc, table_df, max_rows=20)
+
+    # Always use active-workflow maps. This prevents stale intersection geometry
+    # from entering a corridor report and ensures intersection count+density maps.
+    active_maps = maps or _available_maps(st)
+    requested = [m for m in (selected_maps or []) if m in active_maps]
+    if not requested:
+        requested = _dashboard_default_map_selection(active_maps)
+    if requested:
+        doc.add_heading("Selected map layers", level=2)
+        for m in requested:
+            doc.add_heading(str(m), level=3)
+            map_png = _static_map_png(active_maps[m], str(m), overlay_layers=overlay_layers)
+            if map_png:
+                doc.add_picture(io.BytesIO(map_png), width=Inches(6.5))
+            else:
+                doc.add_paragraph("Static map image could not be generated.")
+
+    _add_recommendations_section(doc, tables)
+    doc.add_heading("Decision-ready result tables", level=2)
+    for table_name, df in _report_tables(tables).items():
+        doc.add_heading(str(table_name), level=3)
+        if not _add_dataframe_table(doc, df, max_rows=25):
+            doc.add_paragraph("No records available.")
+
+    buffer = io.BytesIO(); doc.save(buffer); buffer.seek(0)
+    return buffer.getvalue()
+
+# --- V18 report correction: keep KSI-vs-HIN chart, route-level KSI table ------
+
+def _segment_route_ksi_summary_for_report(tables, top_n=50):
+    """Build a route-level KSI summary for the segment/sliding-window report.
+
+    Each row represents one route. KSI values come from unique assigned crashes
+    grouped by the route assigned during sliding-window processing. Route length
+    comes from the Section 7 route summary/route lines when available, with a
+    risk-segment geometry-length fallback. This table intentionally excludes
+    UnitType, CrashCount, and CrashDensity because those fields describe spatial
+    unit density output, not a route-level KSI summary. It also excludes separate
+    Fatalities and Serious injuries columns when K and A are crash-level severity
+    categories, because those values duplicate Fatal crashes (K) and Serious
+    injury crashes (A).
+    """
+    crashes = tables.get("Assigned crashes")
+    if crashes is None or getattr(crashes, "empty", True):
+        return pd.DataFrame()
+
+    work = _drop_geometry(crashes).copy()
+    route_col = _dashboard_route_col(work)
+    if route_col is None:
+        route_col = _normal_col(
+            work,
+            [
+                "Dashboard_Route_Name", "Route", "RouteKey", "FULLNAME",
+                "RouteName_Calc", "RouteName", "RoadName", "Road_Name", "Name",
+            ],
+        )
+    if route_col is None or route_col not in work.columns:
+        return pd.DataFrame()
+
+    work[route_col] = work[route_col].fillna("Unknown route").astype(str).str.strip()
+    work.loc[work[route_col].eq(""), route_col] = "Unknown route"
+
+    crash_id = _crash_id_col(work)
+    if crash_id is None:
+        crash_id = _normal_col(work, ["__S7_UniqueCrashID", "CrashID_S7"])
+
+    kabco = _kabco_col(work)
+    sev_cols = _severity_count_columns(work)
+
+    rows = []
+    for route_name, grp in work.groupby(route_col, dropna=False):
+        if crash_id and crash_id in grp.columns:
+            total_crashes = int(grp[crash_id].astype(str).replace({"": pd.NA, "nan": pd.NA}).nunique(dropna=True))
+        else:
+            total_crashes = int(len(grp))
+
+        fatal_crashes = 0
+        serious_crashes = 0
+        fatalities = 0
+        serious_injuries = 0
+
+        if "K" in sev_cols and sev_cols["K"] in grp.columns:
+            vals = pd.to_numeric(grp[sev_cols["K"]], errors="coerce").fillna(0)
+            fatalities = int(vals.sum())
+            if crash_id and crash_id in grp.columns:
+                fatal_crashes = int(grp.loc[vals > 0, crash_id].astype(str).nunique())
+            else:
+                fatal_crashes = int((vals > 0).sum())
+
+        if "A" in sev_cols and sev_cols["A"] in grp.columns:
+            vals = pd.to_numeric(grp[sev_cols["A"]], errors="coerce").fillna(0)
+            serious_injuries = int(vals.sum())
+            if crash_id and crash_id in grp.columns:
+                serious_crashes = int(grp.loc[vals > 0, crash_id].astype(str).nunique())
+            else:
+                serious_crashes = int((vals > 0).sum())
+
+        if kabco and kabco in grp.columns:
+            severity = grp[kabco].map(_normalize_kabco_value).astype(str).str.upper()
+            if fatal_crashes == 0:
+                if crash_id and crash_id in grp.columns:
+                    fatal_crashes = int(grp.loc[severity.eq("K"), crash_id].astype(str).nunique())
+                else:
+                    fatal_crashes = int(severity.eq("K").sum())
+            if serious_crashes == 0:
+                if crash_id and crash_id in grp.columns:
+                    serious_crashes = int(grp.loc[severity.eq("A"), crash_id].astype(str).nunique())
+                else:
+                    serious_crashes = int(severity.eq("A").sum())
+            if fatalities == 0:
+                fatalities = fatal_crashes
+            if serious_injuries == 0:
+                serious_injuries = serious_crashes
+
+        rows.append({
+            "Route": str(route_name),
+            "Assigned crashes": total_crashes,
+            "Fatal crashes (K)": fatal_crashes,
+            "Serious injury crashes (A)": serious_crashes,
+            "KSI crashes (K+A)": fatal_crashes + serious_crashes,
+        })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    # Preferred source: the route summary generated by sliding_window.py.
+    route_summary = tables.get("Sliding-window route summary")
+    length_lookup = {}
+    if route_summary is not None and not getattr(route_summary, "empty", True):
+        rs = _drop_geometry(route_summary).copy()
+        rs_route = _dashboard_route_col(rs) or _normal_col(rs, ["Route", "Dashboard_Route_Name", "RouteKey"])
+        rs_len = _normal_col(rs, ["Route_Length_Miles", "RouteLengthMiles", "Route_Length_Mi", "RouteLength_Mi"])
+        if rs_route and rs_len and rs_route in rs.columns and rs_len in rs.columns:
+            rs[rs_route] = rs[rs_route].fillna("Unknown route").astype(str).str.strip()
+            rs[rs_len] = pd.to_numeric(rs[rs_len], errors="coerce")
+            length_lookup = rs.groupby(rs_route, dropna=False)[rs_len].max().dropna().to_dict()
+
+    # Fallback to route_lines in Section 7 results.
+    if not length_lookup:
+        results = st.session_state.get("section7_results")
+        route_lines = results.get("route_lines") if isinstance(results, dict) else None
+        if route_lines is not None and not getattr(route_lines, "empty", True):
+            rl = _drop_geometry(route_lines).copy()
+            rl_route = _dashboard_route_col(rl) or _normal_col(rl, ["Route", "RouteKey", "FULLNAME", "RouteName_Calc"])
+            rl_len = _normal_col(rl, ["Route_Length_Mi", "Route_Length_Miles", "RouteLengthMiles"])
+            if rl_route and rl_len and rl_route in rl.columns and rl_len in rl.columns:
+                rl[rl_route] = rl[rl_route].fillna("Unknown route").astype(str).str.strip()
+                rl[rl_len] = pd.to_numeric(rl[rl_len], errors="coerce")
+                length_lookup = rl.groupby(rl_route, dropna=False)[rl_len].max().dropna().to_dict()
+
+    out["Total route length (mi)"] = out["Route"].map(length_lookup)
+    out["Total route length (mi)"] = pd.to_numeric(out["Total route length (mi)"], errors="coerce").round(3)
+
+    out = out.sort_values(
+        ["KSI crashes (K+A)", "Assigned crashes", "Route"],
+        ascending=[False, False, True],
+    ).head(top_n).reset_index(drop=True)
+    out.insert(0, "Rank", range(1, len(out) + 1))
+    return out
+
+
+def _clean_ksi_summary_report_table(df):
+    """Preserve missing data as blank; never manufacture zero density values."""
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame()
+    out = _safe_dataframe_for_display(_drop_geometry(df)).copy()
+    # Do not convert missing CrashCount or CrashDensity to zero. A missing value
+    # means the source table did not carry that measure, not that the measure is 0.
+    for c in ["UnitType", "City", "CrashCount", "CrashDensity", "Crash count", "Crash density"]:
+        if c in out.columns:
+            out[c] = out[c].replace({"nan": "", "None": "", "<NA>": ""})
+    return out
+
+
+def _report_tables(tables, top_n=20):
+    out = dict(_report_tables_before_v17(tables, top_n=top_n))
+    workflow = _active_workflow_type_for_report(st)
+
+    if workflow == "segment":
+        # Remove row-level KSI/HIN relationship tables, but retain the chart.
+        for name in list(out):
+            low = str(name).lower()
+            if "top hin" in low or (
+                ("ksi" in low or "k+a" in low)
+                and "hin" in low
+            ):
+                out.pop(name, None)
+
+        # Replace the ambiguous spatial-unit severity table with a route-level
+        # KSI summary derived from assigned route crashes.
+        for name in list(out):
+            low = str(name).lower()
+            if "severity summary by spatial unit" in low or "ksi summary by spatial unit" in low:
+                out.pop(name, None)
+
+        route_ksi = _segment_route_ksi_summary_for_report(tables, top_n=max(top_n, 50))
+        if not route_ksi.empty:
+            out["KSI summary by route"] = route_ksi
+
+        thresholds = _hin_threshold_report_table(tables)
+        if not thresholds.empty:
+            out["HIN statistical threshold results"] = thresholds
+
+        route_summary = tables.get("Sliding-window route summary")
+        if route_summary is not None and not getattr(route_summary, "empty", True):
+            out["Sliding-window route summary"] = _safe_dataframe_for_display(_drop_geometry(route_summary))
+
+        for name in list(out):
+            low = str(name).lower()
+            if "route" in low and ("average" in low or "median" in low or "hin" in low):
+                out[name] = _clean_route_hin_summary_for_report(out[name])
+    else:
+        if "KSI summary by spatial unit" in out:
+            out["KSI summary by spatial unit"] = _clean_ksi_summary_report_table(out["KSI summary by spatial unit"])
+
+    return {k: v for k, v in out.items() if v is not None and not getattr(v, "empty", True)}
+
+
+def _report_figures_filtered(tables, extra_figures=None):
+    """Keep the KSI-vs-HIN chart; only remove the unwanted top-HIN figure."""
+    figures = _build_default_figures_before_v17(tables) + (extra_figures or [])
+    if _active_workflow_type_for_report(st) == "segment":
+        figures = [
+            item for item in figures
+            if "top hin segments/windows" not in str(item[0]).lower()
+        ]
+    return figures
+
+
+def _is_ksi_hin_relationship_figure(title):
+    low = str(title or "").lower()
+    return (
+        "hin" in low
+        and ("ksi" in low or "k+a" in low)
+        and ("vs" in low or "relationship" in low)
+    )
+
+
+def _export_dashboard_docx(tables, selected_blocks, selected_maps, extra_figures=None, maps=None, overlay_layers=None, report_timezone=None):
+    """Workflow-correct Word report; keep KSI/HIN chart without its raw table."""
+    if Document is None:
+        return None
+    doc = Document()
+    title = _report_title(tables)
+    doc.add_heading(title, level=0)
+    doc.add_paragraph(f"Generated: {_report_time_text(report_timezone)}")
+    doc.add_paragraph(f"User email: {_report_user_email()}")
+    doc.add_heading("Introduction", level=1)
+    doc.add_paragraph(_report_introduction_text(tables))
+
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    _add_data_section(doc, tables, crashes)
+    _add_methodology_section(doc, tables)
+    _add_limitations_section(doc)
+
+    doc.add_heading("Results and visualization", level=1)
+    doc.add_heading("Crash summary", level=2)
+    _add_key_value_table(doc, [(k, _format_kpi_value(v)) for k, v in _summary_kpi_values(crashes).items()])
+
+    figures = _report_figures_filtered(tables, extra_figures=extra_figures)
+    _add_bubble_size_note_if_needed(doc, figures)
+    for fig_title, fig, data in figures:
+        if selected_blocks and fig_title not in selected_blocks:
+            continue
+        doc.add_heading(str(fig_title), level=2)
+        img = _figure_to_png_bytes(_polish_figure(fig))
+        if img:
+            doc.add_picture(io.BytesIO(img), width=Inches(6.5))
+
+        # Keep the KSI/K+A versus HIN chart, but suppress the row-level data
+        # table beneath it as requested.
+        if not _is_ksi_hin_relationship_figure(fig_title):
+            table_df = _safe_dataframe_for_display(data.copy())
+            if not table_df.empty:
+                doc.add_paragraph("Summary table")
+                _add_dataframe_table(doc, table_df, max_rows=20)
+
+    active_maps = maps or _available_maps(st)
+    requested = [m for m in (selected_maps or []) if m in active_maps]
+    if not requested:
+        requested = _dashboard_default_map_selection(active_maps)
+    if requested:
+        doc.add_heading("Selected map layers", level=2)
+        for m in requested:
+            doc.add_heading(str(m), level=3)
+            map_png = _static_map_png(active_maps[m], str(m), overlay_layers=overlay_layers)
+            if map_png:
+                doc.add_picture(io.BytesIO(map_png), width=Inches(6.5))
+            else:
+                doc.add_paragraph("Static map image could not be generated.")
+
+    _add_recommendations_section(doc, tables)
+    doc.add_heading("Decision-ready result tables", level=2)
+    for table_name, df in _report_tables(tables).items():
+        doc.add_heading(str(table_name), level=3)
+        if not _add_dataframe_table(doc, df, max_rows=50):
+            doc.add_paragraph("No records available.")
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+# --- V19 final report table/map corrections ---------------------------------
+
+def _clean_route_hin_summary_for_report(df):
+    """Return a report-only route HIN table with exactly three columns.
+
+    The source figure data can contain duplicate aliases such as mean/AvgHIN and
+    median/MedianHIN.  Prefer the named HIN fields and export only route name,
+    Average HIN, and Median HIN.  Workflow/dashboard data are not modified.
+    """
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame()
+
+    out = _safe_dataframe_for_display(_drop_geometry(df)).copy()
+    out = out.loc[:, ~out.columns.duplicated()].copy()
+
+    normalized = {
+        str(col).strip().lower().replace("_", "").replace(" ", ""): col
+        for col in out.columns
+    }
+
+    route_priority = [
+        "routenameosm", "dashboardroutename", "route", "routekey",
+        "fullname", "routenamecalc", "routename", "roadname", "name",
+    ]
+    avg_priority = [
+        "avghin", "avghinindex", "averagehin", "averagehinindex",
+        "average", "mean",
+    ]
+    median_priority = ["medianhin", "medianhinindex", "median"]
+
+    route_source = next((normalized[k] for k in route_priority if k in normalized), None)
+    avg_source = next((normalized[k] for k in avg_priority if k in normalized), None)
+    median_source = next((normalized[k] for k in median_priority if k in normalized), None)
+
+    cleaned = pd.DataFrame(index=out.index)
+    if route_source is not None:
+        cleaned["Route"] = out[route_source].fillna("Unknown route").astype(str)
+    else:
+        cleaned["Route"] = [f"Route {i + 1}" for i in range(len(out))]
+
+    if avg_source is not None:
+        cleaned["Average HIN"] = pd.to_numeric(out[avg_source], errors="coerce").round(3)
+    if median_source is not None:
+        cleaned["Median HIN"] = pd.to_numeric(out[median_source], errors="coerce").round(3)
+
+    keep = [c for c in ["Route", "Average HIN", "Median HIN"] if c in cleaned.columns]
+    return cleaned[keep]
+
+
+def _is_average_median_hin_route_figure(title):
+    low = str(title or "").lower()
+    return "hin" in low and "route" in low and "average" in low and "median" in low
+
+
+def _report_map_selection_for_workflow(active_maps):
+    """Choose the fixed report map pair for the active workflow."""
+    workflow = _active_workflow_type_for_report(st)
+    if workflow == "segment":
+        preferred = ["Crash density map", "HIN priority map"]
+    elif workflow in ["intersection", "corridor"]:
+        preferred = ["Crash count map", "Crash density map"]
+    else:
+        preferred = _dashboard_default_map_selection(active_maps)
+    return [name for name in preferred if name in active_maps]
+
+
+def _export_dashboard_docx(tables, selected_blocks, selected_maps, extra_figures=None, maps=None, overlay_layers=None, report_timezone=None):
+    """Word report with workflow-specific maps and cleaned HIN route table."""
+    if Document is None:
+        return None
+
+    doc = Document()
+    title = _report_title(tables)
+    doc.add_heading(title, level=0)
+    doc.add_paragraph(f"Generated: {_report_time_text(report_timezone)}")
+    doc.add_paragraph(f"User email: {_report_user_email()}")
+    doc.add_heading("Introduction", level=1)
+    doc.add_paragraph(_report_introduction_text(tables))
+
+    crashes = tables.get("Assigned crashes", tables.get("Uploaded crashes"))
+    _add_data_section(doc, tables, crashes)
+    _add_methodology_section(doc, tables)
+    _add_limitations_section(doc)
+
+    doc.add_heading("Results and visualization", level=1)
+    doc.add_heading("Crash summary", level=2)
+    _add_key_value_table(
+        doc,
+        [(k, _format_kpi_value(v)) for k, v in _summary_kpi_values(crashes).items()],
+    )
+
+    figures = _report_figures_filtered(tables, extra_figures=extra_figures)
+    _add_bubble_size_note_if_needed(doc, figures)
+    for fig_title, fig, data in figures:
+        if selected_blocks and fig_title not in selected_blocks:
+            continue
+
+        doc.add_heading(str(fig_title), level=2)
+        img = _figure_to_png_bytes(_polish_figure(fig))
+        if img:
+            doc.add_picture(io.BytesIO(img), width=Inches(6.5))
+
+        # Keep the KSI/K+A-versus-HIN chart but omit its detailed row table.
+        if _is_ksi_hin_relationship_figure(fig_title):
+            continue
+
+        table_df = _safe_dataframe_for_display(data.copy())
+        if _is_average_median_hin_route_figure(fig_title):
+            table_df = _clean_route_hin_summary_for_report(table_df)
+
+        if not table_df.empty:
+            doc.add_paragraph("Summary table")
+            _add_dataframe_table(doc, table_df, max_rows=20)
+
+    # Report maps are fixed by workflow, independent of the dashboard selector:
+    # segment = crash density + HIN; intersection/corridor = count + density.
+    active_maps = maps or _available_maps(st)
+    requested = _report_map_selection_for_workflow(active_maps)
+    if requested:
+        doc.add_heading("Selected map layers", level=2)
+        for map_name in requested:
+            doc.add_heading(str(map_name), level=3)
+            map_png = _static_map_png(
+                active_maps[map_name],
+                str(map_name),
+                overlay_layers=overlay_layers,
+            )
+            if map_png:
+                doc.add_picture(io.BytesIO(map_png), width=Inches(6.5))
+            else:
+                doc.add_paragraph("Static map image could not be generated.")
+
+    _add_recommendations_section(doc, tables)
+    doc.add_heading("Decision-ready result tables", level=2)
+    for table_name, df in _report_tables(tables).items():
+        doc.add_heading(str(table_name), level=3)
+        if not _add_dataframe_table(doc, df, max_rows=50):
+            doc.add_paragraph("No records available.")
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+# --- V20 corridor report map rendering correction ----------------------------
+
+def _static_map_png(gdf, title="Map layer", overlay_layers=None):
+    """Create a static report map with workflow-appropriate geometry styling.
+
+    Intersection polygons may use representative points so small locations are
+    visible. Corridor reports never use representative-point markers; corridor
+    lines or polygon boundaries are emphasized directly with a light halo.
+    Segment maps continue to color the segment geometries themselves.
+    """
+    if gdf is None or getattr(gdf, "empty", True):
+        return None
+
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+
+        work = _repair_gdf_crs(gdf, None)
+        work = work.to_crs(epsg=4326)
+        work = _safe_geojson_gdf(work)
+        if work is None or getattr(work, "empty", True):
+            return None
+
+        metric = _metric_for_map(work, title)
+        workflow = _active_workflow_type_for_report(st)
+        is_corridor_report = workflow == "corridor"
+        is_intersection_report = workflow == "intersection"
+
+        fig, ax = plt.subplots(figsize=(9.5, 6.2))
+
+        # Light context layers first. Do not add corridor context over a
+        # corridor result map because it competes with the metric symbology.
+        for label, layer in (overlay_layers or {}).items():
+            if layer is None or getattr(layer, "empty", True):
+                continue
+            try:
+                lname = str(label).lower()
+                if is_corridor_report and "corridor" in lname:
+                    continue
+
+                ov = layer.copy()
+                if ov.crs is None:
+                    ov = ov.set_crs(epsg=4326)
+                ov = ov.to_crs(epsg=4326)
+
+                if "road" in lname:
+                    ov.plot(ax=ax, color="#94a3b8", linewidth=0.55, alpha=0.48, zorder=1)
+                elif "signal" in lname and all(
+                    getattr(g, "geom_type", "") == "Point"
+                    for g in ov.geometry.dropna().head(25)
+                ):
+                    ov.plot(ax=ax, color="#16a34a", markersize=10, alpha=0.70, zorder=2)
+                elif "crash" in lname and all(
+                    getattr(g, "geom_type", "") == "Point"
+                    for g in ov.geometry.dropna().head(25)
+                ):
+                    ov.plot(ax=ax, color="#ef4444", markersize=4, alpha=0.35, zorder=2)
+                elif "boundary" in lname:
+                    ov.boundary.plot(ax=ax, color="#111827", linewidth=1.0, alpha=0.65, zorder=2)
+                elif "corridor" in lname:
+                    ov.plot(ax=ax, color="#7c3aed", linewidth=1.0, alpha=0.22, zorder=2)
+            except Exception:
+                pass
+
+        geom_types = set(str(g.geom_type) for g in work.geometry.dropna().head(100))
+        all_lines = bool(geom_types) and all("Line" in gt for gt in geom_types)
+        all_points = bool(geom_types) and all(gt in {"Point", "MultiPoint"} for gt in geom_types)
+        has_polygon = any("Polygon" in gt for gt in geom_types)
+
+        if metric and metric in work.columns:
+            values = pd.to_numeric(work[metric], errors="coerce")
+            work = work.loc[values.notna()].copy()
+            work[metric] = values.loc[values.notna()]
+
+            common_legend = {
+                "label": _nice_metric_label(metric),
+                "shrink": 0.72,
+            }
+
+            if is_corridor_report:
+                # Corridors are linear facilities. Show the facility geometry,
+                # not a point at its centroid/representative location.
+                if all_lines:
+                    # Neutral halo separates the colored corridor from the road
+                    # context without implying an additional data layer.
+                    work.plot(
+                        ax=ax,
+                        color="#ffffff",
+                        linewidth=5.6,
+                        alpha=0.95,
+                        zorder=8,
+                    )
+                    work.plot(
+                        ax=ax,
+                        column=metric,
+                        legend=True,
+                        cmap="RdYlGn_r",
+                        linewidth=3.6,
+                        alpha=0.98,
+                        zorder=10,
+                        legend_kwds=common_legend,
+                    )
+                elif has_polygon:
+                    # Narrow corridor buffers are more legible as lightly filled
+                    # bands with a metric-colored boundary. No point markers.
+                    work.plot(
+                        ax=ax,
+                        column=metric,
+                        legend=True,
+                        cmap="RdYlGn_r",
+                        linewidth=0.0,
+                        alpha=0.28,
+                        zorder=8,
+                        legend_kwds=common_legend,
+                    )
+                    boundary = work.copy()
+                    boundary["geometry"] = boundary.geometry.boundary
+                    boundary.plot(
+                        ax=ax,
+                        color="#ffffff",
+                        linewidth=4.8,
+                        alpha=0.90,
+                        zorder=9,
+                    )
+                    boundary.plot(
+                        ax=ax,
+                        column=metric,
+                        cmap="RdYlGn_r",
+                        linewidth=2.8,
+                        alpha=0.98,
+                        zorder=10,
+                    )
+                else:
+                    work.plot(
+                        ax=ax,
+                        column=metric,
+                        legend=True,
+                        cmap="RdYlGn_r",
+                        linewidth=3.2,
+                        alpha=0.96,
+                        zorder=10,
+                        legend_kwds=common_legend,
+                    )
+
+            elif all_lines:
+                work.plot(
+                    ax=ax,
+                    column=metric,
+                    legend=True,
+                    cmap="RdYlGn_r",
+                    linewidth=1.8,
+                    alpha=0.96,
+                    zorder=10,
+                    legend_kwds=common_legend,
+                )
+            elif all_points:
+                work.plot(
+                    ax=ax,
+                    column=metric,
+                    legend=True,
+                    cmap="RdYlGn_r",
+                    markersize=46,
+                    alpha=0.96,
+                    zorder=10,
+                    legend_kwds=common_legend,
+                )
+            else:
+                work.plot(
+                    ax=ax,
+                    column=metric,
+                    legend=True,
+                    cmap="RdYlGn_r",
+                    linewidth=1.2,
+                    edgecolor="#374151",
+                    alpha=0.55,
+                    zorder=9,
+                    legend_kwds=common_legend,
+                )
+
+                # Retain representative points only for intersection-style
+                # polygon units. They are intentionally disabled for corridors.
+                if is_intersection_report:
+                    try:
+                        pts = work.copy()
+                        pts["geometry"] = pts.geometry.representative_point()
+                        pts.plot(
+                            ax=ax,
+                            column=metric,
+                            cmap="RdYlGn_r",
+                            markersize=36,
+                            alpha=0.98,
+                            zorder=12,
+                        )
+                    except Exception:
+                        pass
+        else:
+            if is_corridor_report and all_lines:
+                work.plot(ax=ax, color="#ffffff", linewidth=5.4, alpha=0.95, zorder=8)
+                work.plot(ax=ax, color="#2563eb", linewidth=3.4, alpha=0.96, zorder=10)
+            elif is_corridor_report and has_polygon:
+                work.plot(ax=ax, color="#60a5fa", linewidth=1.8, edgecolor="#2563eb", alpha=0.30, zorder=10)
+            else:
+                work.plot(ax=ax, color="#60a5fa", linewidth=1.2, edgecolor="#374151", alpha=0.75, zorder=10)
+
+        bounds = _fit_bounds_for_layer(work)
+        if bounds is None:
+            plt.close(fig)
+            return None
+
+        minx, miny, maxx, maxy = bounds
+        dx = max((maxx - minx) * 0.08, 0.002)
+        dy = max((maxy - miny) * 0.08, 0.002)
+        ax.set_xlim(minx - dx, maxx + dx)
+        ax.set_ylim(miny - dy, maxy + dy)
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.set_axis_off()
+
+        legend_items = []
+        labels = set((overlay_layers or {}).keys())
+        if "Roads" in labels or "Road class layer" in labels:
+            legend_items.append(Line2D([0], [0], color="#94a3b8", lw=2, label="Roads"))
+        if "Signals" in labels:
+            legend_items.append(
+                Line2D([0], [0], marker="o", color="w", markerfacecolor="#16a34a", markersize=7, label="Signals")
+            )
+        if "Crash points" in labels or "Assigned crash points" in labels:
+            legend_items.append(
+                Line2D([0], [0], marker="o", color="w", markerfacecolor="#ef4444", markersize=6, label="Crash points")
+            )
+        if legend_items:
+            ax.legend(handles=legend_items, loc="lower left", frameon=True, fontsize=8)
+
+        buffer = io.BytesIO()
+        fig.savefig(buffer, format="png", dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        buffer.seek(0)
+        return buffer.getvalue()
+    except Exception:
+        return None
+
