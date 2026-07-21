@@ -120,6 +120,33 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+if False:  # Debug session-state inspector removed from the published workflow.
+    st.write("Number of keys:", len(st.session_state))
+
+    for key in sorted(st.session_state.keys()):
+        value = st.session_state[key]
+
+        try:
+            value_type = type(value).__name__
+
+            if hasattr(value, "shape"):
+                summary = f"{value_type}, shape={value.shape}"
+            elif isinstance(value, dict):
+                summary = f"dict, {len(value)} items"
+            elif isinstance(value, (list, tuple, set)):
+                summary = f"{value_type}, {len(value)} items"
+            elif isinstance(value, bytes):
+                size_mb = len(value) / (1024 ** 2)
+                summary = f"bytes, {size_mb:.2f} MB"
+            else:
+                preview = str(value)[:150]
+                summary = f"{value_type}: {preview}"
+
+            st.write(f"**{key}** — {summary}")
+
+        except Exception as exc:
+            st.write(f"**{key}** — unable to inspect: {exc}")
+
 st.markdown(
     """
     <style>

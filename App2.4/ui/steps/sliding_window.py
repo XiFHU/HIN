@@ -363,22 +363,38 @@ def _ensure_hin_priority_columns(gdf):
 
     out = gdf.copy()
 
-    if "Max_Window_Score" not in out.columns:
-        if "Window_Score" in out.columns:
-            out["Max_Window_Score"] = out["Window_Score"]
-        elif "Risk_Score" in out.columns:
-            out["Max_Window_Score"] = out["Risk_Score"]
-        elif "EPDO" in out.columns:
-            out["Max_Window_Score"] = out["EPDO"]
-        elif "Crash_Count" in out.columns:
-            out["Max_Window_Score"] = out["Crash_Count"]
-        else:
-            out["Max_Window_Score"] = 0
+    # HIN_Non_Normalized is the canonical exported raw HIN value.  Prefer it
+    # when reading cleaned/new results, while retaining the legacy fields for
+    # older saved sessions and internal code paths.
+    if "HIN_Non_Normalized" in out.columns:
+        raw_score = pd.to_numeric(
+            out["HIN_Non_Normalized"],
+            errors="coerce"
+        ).fillna(0.0)
+    else:
+        raw_source = next(
+            (
+                col for col in (
+                    "High_Risk_Score",
+                    "Max_Window_Score",
+                    "Window_Score",
+                    "Risk_Score",
+                    "EPDO",
+                    "Crash_Count",
+                )
+                if col in out.columns
+            ),
+            None,
+        )
+        raw_score = (
+            pd.to_numeric(out[raw_source], errors="coerce").fillna(0.0)
+            if raw_source is not None
+            else pd.Series(0.0, index=out.index)
+        )
+        out["HIN_Non_Normalized"] = raw_score
 
-    raw_score = pd.to_numeric(
-        out["Max_Window_Score"],
-        errors="coerce"
-    ).fillna(0)
+    if "Max_Window_Score" not in out.columns:
+        out["Max_Window_Score"] = raw_score
 
     if "High_Risk_Score" not in out.columns:
         out["High_Risk_Score"] = raw_score
@@ -1056,6 +1072,7 @@ def _make_segment_comparison_map(
                 risk_segments,
                 numeric_cols=[
                     "HIN_Priority_Index",
+                    "HIN_Non_Normalized",
                     "High_Risk_Score",
                     "Max_Window_Score",
                     "CrashCount",
@@ -1065,23 +1082,16 @@ def _make_segment_comparison_map(
                 ]
             )
 
-            if "High_Risk_Score" not in risk_segments.columns:
-                if "Max_Window_Score" in risk_segments.columns:
-                    risk_segments["High_Risk_Score"] = pd.to_numeric(
-                        risk_segments["Max_Window_Score"],
-                        errors="coerce"
-                    ).fillna(0)
-                else:
-                    risk_segments["High_Risk_Score"] = 0
+            risk_segments = _ensure_hin_priority_columns(risk_segments)
 
             risk_metric_col = (
-                "High_Risk_Score"
+                "HIN_Non_Normalized"
                 if "High Risk Score" in selected_layers
                 else "HIN_Priority_Index"
             )
             risk_layer_name = (
                 "High Risk Score"
-                if risk_metric_col == "High_Risk_Score"
+                if risk_metric_col == "HIN_Non_Normalized"
                 else "HIN Priority Index"
             )
 
@@ -1121,8 +1131,7 @@ def _make_segment_comparison_map(
                     ]
                     + _route_tooltip_fields(risk_segments)
                     + [
-                        "High_Risk_Score",
-                        "Max_Window_Score",
+                        "HIN_Non_Normalized",
                         "HIN_Priority_Index",
                         "Crash_Count",
                         "CrashCount",
@@ -1815,4 +1824,3 @@ def render_sliding_window_step(st_folium, workflow_context, spatial_unit=None):
                     + str(len(risk_corridors_map) if risk_corridors_map is not None else 0)
                 )
             )
-

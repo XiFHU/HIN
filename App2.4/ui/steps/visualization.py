@@ -249,10 +249,31 @@ def _ensure_high_risk_score_column(gdf):
 
     out = gdf.copy()
 
+    if "HIN_Non_Normalized" in out.columns:
+        raw_score = pd.to_numeric(
+            out["HIN_Non_Normalized"],
+            errors="coerce"
+        ).fillna(0)
+    elif "High_Risk_Score" in out.columns:
+        raw_score = pd.to_numeric(
+            out["High_Risk_Score"],
+            errors="coerce"
+        ).fillna(0)
+        out["HIN_Non_Normalized"] = raw_score
+    elif "Max_Window_Score" in out.columns:
+        raw_score = pd.to_numeric(
+            out["Max_Window_Score"],
+            errors="coerce"
+        ).fillna(0)
+        out["HIN_Non_Normalized"] = raw_score
+    else:
+        raw_score = pd.Series(0.0, index=out.index)
+        out["HIN_Non_Normalized"] = raw_score
+
     if "High_Risk_Score" not in out.columns:
-        if "Max_Window_Score" in out.columns:
+        if "HIN_Non_Normalized" in out.columns:
             out["High_Risk_Score"] = pd.to_numeric(
-                out["Max_Window_Score"],
+                out["HIN_Non_Normalized"],
                 errors="coerce"
             ).fillna(0)
         else:
@@ -270,6 +291,7 @@ def _hin_summary_metric_options(risk_segments_clean, preferred_metric):
     preferred = [
         preferred_metric,
         "HIN_Priority_Index",
+        "HIN_Non_Normalized",
         "High_Risk_Score",
         "Max_Window_Score",
         "RiskScore",
@@ -810,7 +832,7 @@ def _render_high_risk_summary_visualization(st_folium, workflow_context):
     _render_score_summary_visualization(
         st_folium=st_folium,
         workflow_context=workflow_context,
-        preferred_metric="High_Risk_Score",
+        preferred_metric="HIN_Non_Normalized",
         metric_label="High Risk Score",
         layer_name="High Risk Score",
         key_prefix="high_risk_summary_map",

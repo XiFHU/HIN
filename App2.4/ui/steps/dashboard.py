@@ -6697,6 +6697,303 @@ def _download_generated_data_zip(st, tables):
                 return pd.DataFrame(rows)
         return pd.DataFrame(rows)
 
+    # CLEAN EXPORT V2 START
+    # Keep the generated-data ZIP relational and intentionally small.  Each
+    # builder below owns one row grain, so the same dataset is not exported
+    # again under a different report/dashboard name.
+    def _first_existing_column(df, candidates):
+        return next((c for c in candidates if c and c in df.columns), None)
+
+    def _copy_export_column(source, target, output_name, candidates, numeric=False):
+        source_name = _first_existing_column(source, candidates)
+        if source_name is None:
+            return
+        values = source[source_name]
+        target[output_name] = (
+            pd.to_numeric(values, errors="coerce") if numeric else values
+        )
+
+    def build_sliding_windows_export(results):
+        """Return exactly one row per sliding window with stable field names."""
+        if not isinstance(results, dict):
+            return None
+        source = add_hin_index_to_windows(results.get("risk_windows"))
+        if source is None or getattr(source, "empty", True):
+            return None
+
+        source = source.copy()
+        out = pd.DataFrame(index=source.index)
+
+        route_id_col = _first_existing_column(
+            source,
+            ["RouteKey", "RouteID", "Route", "Dashboard_Route_Name", "RouteNameOSM"],
+        )
+        route_name_col = _first_existing_column(
+            source,
+            ["Route", "Dashboard_Route_Name", "RouteNameOSM", "FULLNAME", "RouteName_Calc"],
+        )
+        window_id_col = _first_existing_column(source, ["WindowID", "Window_ID"])
+
+        if route_id_col:
+            out["RouteID"] = source[route_id_col].fillna("").astype(str)
+        if route_name_col:
+            out["RouteName"] = source[route_name_col].fillna("").astype(str)
+        if window_id_col:
+            out["WindowID"] = source[window_id_col]
+
+        _copy_export_column(source, out, "FromMile", ["Win_From_Mi", "FromMile"], numeric=True)
+        _copy_export_column(source, out, "ToMile", ["Win_To_Mi", "ToMile"], numeric=True)
+        _copy_export_column(source, out, "WindowLengthMiles", ["Window_Length_Mi", "Length_Miles"], numeric=True)
+        _copy_export_column(source, out, "CrashCount", ["Crash_Count", "CrashCount"], numeric=True)
+        _copy_export_column(source, out, "EPDO", ["EPDO"], numeric=True)
+        _copy_export_column(
+            source,
+            out,
+            "HIN_Non_Normalized",
+            ["HIN_Non_Normalized", "Window_Score", "High_Risk_Score"],
+            numeric=True,
+        )
+        _copy_export_column(
+            source,
+            out,
+            "HIN_Priority_Index",
+            ["HIN_Priority_Index", "HIN_Index"],
+            numeric=True,
+        )
+        _copy_export_column(source, out, "RiskFlag", ["Risk_Flag"])
+        _copy_export_column(source, out, "RiskClass", ["Risk_Class"])
+
+        out["RiskMetric"] = st.session_state.get("section7_risk_metric", "")
+        out["HINThreshold"] = results.get("risk_threshold", None)
+
+        # Preserve geometry only for the ID-only GeoJSON layer written below.
+        if hasattr(source, "geometry") and "geometry" in source.columns:
+            try:
+                return gpd.GeoDataFrame(out, geometry=source.geometry, crs=getattr(source, "crs", None))
+            except Exception:
+                out["geometry"] = source["geometry"]
+        return out.reset_index(drop=True)
+
+    def build_hin_segments_export(results):
+        """Return one row per scored base segment without duplicate score aliases."""
+        if not isinstance(results, dict):
+            return None
+        source = results.get("risk_segments")
+        if source is None or getattr(source, "empty", True):
+            return None
+
+        source = source.copy()
+        out = pd.DataFrame(index=source.index)
+        field_map = [
+            ("SegID", ["SegID", "SegmentID", "SourceSegmentID", "OSMEdgeID"]),
+            ("RouteID", ["RouteKey", "RouteID"]),
+            ("RouteName", ["Route", "Dashboard_Route_Name", "RouteNameOSM", "FULLNAME", "RouteName_Calc"]),
+            ("FromMile", ["FromMile", "From_Mile"]),
+            ("ToMile", ["ToMile", "To_Mile"]),
+            ("Crash_Count", ["Crash_Count", "CrashCount"]),
+            ("EPDO", ["EPDO"]),
+            ("HIN_Non_Normalized", ["HIN_Non_Normalized", "High_Risk_Score", "Max_Window_Score"]),
+            ("HIN_Priority_Index", ["HIN_Priority_Index", "HIN_Index"]),
+            ("Risk_Flag", ["Risk_Flag"]),
+            ("Risk_Class", ["Risk_Class"]),
+        ]
+        numeric_names = {
+            "FromMile", "ToMile", "Crash_Count", "EPDO",
+            "HIN_Non_Normalized", "HIN_Priority_Index",
+        }
+        for output_name, candidates in field_map:
+            _copy_export_column(
+                source,
+                out,
+                output_name,
+                candidates,
+                numeric=output_name in numeric_names,
+            )
+        if hasattr(source, "geometry") and "geometry" in source.columns:
+            try:
+                return gpd.GeoDataFrame(out, geometry=source.geometry, crs=getattr(source, "crs", None))
+            except Exception:
+                out["geometry"] = source["geometry"]
+        return out.reset_index(drop=True)
+
+    def build_route_summary_export(results):
+        """Return one row per route with weighted EPDO and raw/normalized HIN."""
+        if not isinstance(results, dict):
+            return None
+        source = results.get("route_summary")
+        if source is None or getattr(source, "empty", True):
+            return None
+
+        out = _drop_geometry(source).copy()
+        if "Max_HIN_Non_Normalized" not in out.columns:
+            raw_col = _first_existing_column(
+                out,
+                ["Max_High_Risk_Score", "Max_Window_Score"],
+            )
+            if raw_col:
+                out["Max_HIN_Non_Normalized"] = pd.to_numeric(
+                    out[raw_col], errors="coerce"
+                ).fillna(0)
+
+        # Remove the old duplicate/raw-score label from the exported table.
+        out = out.drop(
+            columns=["Max_High_Risk_Score", "Risk_Score"],
+            errors="ignore",
+        )
+        for col in [
+            "Assigned_EPDO", "Max_Window_EPDO", "Max_HIN_Non_Normalized",
+            "Max_HIN_Priority_Index",
+        ]:
+            if col in out.columns:
+                out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+        return out.reset_index(drop=True)
+
+    def build_spatial_units_export(density, kabco):
+        """Return one row per UnitID, including density and KABCO totals."""
+        if density is None or getattr(density, "empty", True):
+            return None
+
+        source = density.copy()
+        unit_col = _first_existing_column(
+            source,
+            ["UnitID", "SpatialUnitID", "IntersectionID", "CorridorID", "SegmentID"],
+        )
+        if unit_col is None:
+            return None
+
+        out = pd.DataFrame(index=source.index)
+        # UnitID is the exact identifier created by density classification.
+        # Do not replace it with a road-source or HIN segment identifier.
+        out["UnitID"] = source[unit_col].astype(str)
+        out["_AnalysisUnitJoinKey"] = source[unit_col].astype(str)
+        column_map = [
+            ("UnitType", ["UnitType", "AnalysisType", "SpatialUnitType", "IntersectionType", "CorridorType"]),
+            ("RouteID", ["RouteKey", "RouteID"]),
+            ("RouteName", ["Route", "Dashboard_Route_Name", "RouteNameOSM", "FULLNAME", "RouteName_Calc"]),
+            ("FromMile", ["FromMile", "From_Mile"]),
+            ("ToMile", ["ToMile", "To_Mile"]),
+            ("LengthMiles", ["Length_Miles", "Length_Mile", "SegmentLength_Mile", "CorridorLength_Mile"]),
+            ("AreaSquareMiles", ["Area_SqMi", "AreaSqMi", "Area_Sq_Mi"]),
+            ("FunctionalClass", ["FunctionalClass"]),
+            ("RoadClass", ["RoadClass"]),
+            ("RoadType", ["RoadType"]),
+            ("CrashCount", ["CrashCount", "Crash_Count", "TotalCrashes"]),
+            ("CrashDensity", ["CrashDensity", "Crash_Density", "Density"]),
+            ("City", ["City", "city_name"]),
+        ]
+        numeric_names = {"FromMile", "ToMile", "LengthMiles", "AreaSquareMiles", "CrashCount", "CrashDensity"}
+        for output_name, candidates in column_map:
+            _copy_export_column(
+                source,
+                out,
+                output_name,
+                candidates,
+                numeric=output_name in numeric_names,
+            )
+
+        # KABCO already has one row per UnitID, so it belongs in this table
+        # instead of a second file with the same row grain.
+        if kabco is not None and not getattr(kabco, "empty", True):
+            severity = kabco.copy()
+            kabco_unit_col = _first_existing_column(severity, ["UnitID", unit_col])
+            if kabco_unit_col:
+                severity[kabco_unit_col] = severity[kabco_unit_col].astype(str)
+                keep = [kabco_unit_col] + [c for c in ["K", "A", "B", "C", "O", "Total"] if c in severity.columns]
+                severity = severity[keep].drop_duplicates(subset=[kabco_unit_col])
+                severity = severity.rename(
+                    columns={kabco_unit_col: "_AnalysisUnitJoinKey", "Total": "KABCOTotal"}
+                )
+                out = out.merge(
+                    severity,
+                    on="_AnalysisUnitJoinKey",
+                    how="left",
+                    validate="one_to_one",
+                )
+
+        for severity_name in ["K", "A", "B", "C", "O"]:
+            if severity_name not in out.columns:
+                out[severity_name] = 0
+            out[severity_name] = pd.to_numeric(out[severity_name], errors="coerce").fillna(0).astype(int)
+        out["KSICrashCount"] = out["K"] + out["A"]
+
+        # CrashCount is canonical; KABCOTotal is only used to fill a missing
+        # density-table count and is not exported as a duplicate variable.
+        if "KABCOTotal" in out.columns:
+            if "CrashCount" not in out.columns:
+                out["CrashCount"] = pd.to_numeric(out["KABCOTotal"], errors="coerce")
+            else:
+                out["CrashCount"] = pd.to_numeric(out["CrashCount"], errors="coerce").fillna(
+                    pd.to_numeric(out["KABCOTotal"], errors="coerce")
+                )
+            out = out.drop(columns=["KABCOTotal"])
+
+        out = out.drop(columns=["_AnalysisUnitJoinKey"], errors="ignore")
+
+        if hasattr(source, "geometry") and "geometry" in source.columns:
+            try:
+                return gpd.GeoDataFrame(out, geometry=source.geometry, crs=getattr(source, "crs", None))
+            except Exception:
+                out["geometry"] = source["geometry"]
+        return out.reset_index(drop=True)
+
+    def build_crash_assignments_export(assigned):
+        """Return one clean row per crash-to-unit assignment."""
+        if assigned is None or getattr(assigned, "empty", True):
+            return None
+        source = _with_point_lat_lon(assigned).copy()
+        out = pd.DataFrame(index=source.index)
+
+        field_map = [
+            ("CrashID", [st.session_state.get("mapped_crash_id_col"), "SourceCrashID", "CrashID", "CRASH_ID", "OBJECTID"]),
+            ("UnitID", ["UnitID", "SpatialUnitID", "IntersectionID", "CorridorID", "SegmentID"]),
+            ("RouteID", ["RouteKey", "RouteID"]),
+            ("RouteName", ["Route", "Dashboard_Route_Name", "RouteNameOSM", "FULLNAME", "RouteName_Calc"]),
+            ("CrashDate", ["DashboardCrashDate", "CrashDate", "Date"]),
+            ("CrashYear", ["DashboardCrashYear", "CrashYear", "Year"]),
+            ("CrashMonth", ["DashboardCrashMonth", "CrashMonth", "Month"]),
+            ("KABCO", ["DashboardKABCO", "KABCO", "Severity"]),
+            ("CrashType", ["DashboardCrashType", "CrashType", "Crash Type"]),
+            ("Mode", ["DashboardMode", "Mode", "Veh1 Type"]),
+            ("Fatalities", ["Fatalities"]),
+            ("SeriousInjuries", ["SeriousInjuries", "Level A Injuries"]),
+            ("MinorInjuries", ["MinorInjuries", "Level B Injuries"]),
+            ("PossibleInjuries", ["PossibleInjuries", "Level C Injuries"]),
+            ("NoInjury", ["NoInjury", "Uninjured"]),
+            ("Latitude", ["Latitude", "Lat", "LAT", "Y"]),
+            ("Longitude", ["Longitude", "Long", "Lon", "LON", "X"]),
+        ]
+        numeric_names = {
+            "CrashYear", "Fatalities", "SeriousInjuries", "MinorInjuries",
+            "PossibleInjuries", "NoInjury", "Latitude", "Longitude",
+        }
+        for output_name, candidates in field_map:
+            _copy_export_column(source, out, output_name, candidates, numeric=output_name in numeric_names)
+
+        route_position_col = _first_existing_column(source, ["Route_Pos_M", "RoutePositionMeters"])
+        if route_position_col:
+            out["RouteMile"] = pd.to_numeric(source[route_position_col], errors="coerce") / 1609.344
+
+        if hasattr(source, "geometry") and "geometry" in source.columns:
+            try:
+                return gpd.GeoDataFrame(out, geometry=source.geometry, crs=getattr(source, "crs", None))
+            except Exception:
+                out["geometry"] = source["geometry"]
+        return out.reset_index(drop=True)
+
+    def geometry_only(obj, id_cols):
+        """Keep existing workflow identifiers plus geometry; never create IDs."""
+        if obj is None or getattr(obj, "empty", True):
+            return None
+        if not hasattr(obj, "geometry") or "geometry" not in obj.columns:
+            return None
+        if isinstance(id_cols, str):
+            id_cols = [id_cols]
+        existing_ids = [c for c in id_cols if c in obj.columns]
+        if not existing_ids:
+            return None
+        return obj[existing_ids + ["geometry"]].copy()
+    # CLEAN EXPORT V2 END
+
     def add_df(zf, folder, name, obj, description="", csv_only=False, geojson_only=False):
         if obj is None or getattr(obj, "empty", False):
             return 0
@@ -6756,125 +7053,117 @@ def _download_generated_data_zip(st, tables):
         )
 
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        # 1. Roads: analysis road segments only, with route/milepost/length fields.
-        roads = st.session_state.get("selected_roads")
-        if roads is None or getattr(roads, "empty", True):
-            roads = st.session_state.get("base_roads")
-        add_df(
-            zf,
-            "roads",
-            "road_segments_from_to_mile",
-            simplify_roads(roads),
-            "Analysis road segments with FromMile, ToMile, and SegmentLength_Mile.",
-        )
-
-        # 2. Signals: cleaned signal table only, with SignalID, lat/lon, and city.
-        add_df(
-            zf,
-            "signals",
-            "cleaned_signal_table",
-            simplify_signals(st.session_state.get("signals_clean")),
-            "Cleaned/de-duplicated signal points with SignalID, latitude, longitude, and city.",
-        )
-
-        # 3. Corridors, spatial-unit density results, assigned crash points, and summary tables.
-        corridors = st.session_state.get("final_corridors")
-        if corridors is None or getattr(corridors, "empty", True):
-            corridors = st.session_state.get("corridors")
-        add_df(
-            zf,
-            "spatial_units_crashes",
-            "corridor_table",
-            simplify_corridors(corridors),
-            "Final corridor table with CorridorID, Route, City, and corridor geometry.",
-        )
-
-        # The separate spatial_units table is intentionally not exported because
-        # the density results file contains the necessary unit ID/type/count/rate
-        # fields plus geometry.
-        add_df(
-            zf,
-            "spatial_units_crashes",
-            "spatial_units_density_results",
-            simplify_spatial_units_density(st.session_state.get("spatial_units_density_map")),
-            "Spatial unit density results with only UnitID, UnitType, SegmentID, CrashCount, Length_Miles, Area_SqMi, and CrashDensity.",
-        )
-        add_df(
-            zf,
-            "spatial_units_crashes",
-            "crashes_assigned_to_units",
-            _with_point_lat_lon(st.session_state.get("assigned_crashes")),
-            "Crash point records assigned to generated spatial units.",
-        )
-        add_df(
-            zf,
-            "spatial_units_crashes",
-            "kabco_summary",
+        # CLEAN EXPORT V3 START: canonical tables with distinct row grains.
+        results = st.session_state.get("section7_results")
+        windows_export = build_sliding_windows_export(results)
+        hin_segments_export = build_hin_segments_export(results)
+        route_summary_export = build_route_summary_export(results)
+        units_export = build_spatial_units_export(
+            st.session_state.get("spatial_units_density_map"),
             st.session_state.get("kabco_result"),
-            "KABCO crash summary table generated by the workflow.",
+        )
+        spatial_unit_export_id = "UnitID"
+        crashes_export = build_crash_assignments_export(
+            st.session_state.get("assigned_crashes")
+        )
+
+        add_df(
+            zf,
+            "tables",
+            "sliding_window_table",
+            windows_export,
+            "One row per sliding window with weighted EPDO and raw/normalized HIN.",
             csv_only=True,
         )
         add_df(
             zf,
-            "spatial_units_crashes",
-            "classified_results",
-            st.session_state.get("classified"),
-            "Classified crash/spatial-unit result table generated by the workflow.",
+            "tables",
+            "hin_segments",
+            hin_segments_export,
+            "One row per scored base segment with weighted EPDO and raw/normalized HIN.",
+            csv_only=True,
+        )
+        add_df(
+            zf,
+            "tables",
+            "report_table_sliding_window_route_summary",
+            route_summary_export,
+            "One row per route with assigned weighted EPDO and maximum raw/normalized HIN.",
+            csv_only=True,
+        )
+        add_df(
+            zf,
+            "tables",
+            "spatial_units",
+            units_export,
+            "One row per spatial unit with route/segment attributes, crash density, and KABCO counts.",
+            csv_only=True,
+        )
+        add_df(
+            zf,
+            "tables",
+            "crash_assignments",
+            crashes_export,
+            "One row per crash-to-spatial-unit assignment with analysis-relevant crash fields.",
+            csv_only=True,
         )
 
-        # Include report-ready tables, but not raw uploaded crash data and not duplicates of core HIN/window files.
-        try:
-            report_tables = _report_tables(tables or {}, top_n=100000)
-        except Exception:
-            report_tables = {}
-        for table_name, table_obj in (report_tables or {}).items():
-            lower = str(table_name).lower()
-            if "uploaded crash" in lower or "raw crash" in lower:
-                continue
-            # Avoid duplicate exports of the core sliding-window/HIN files below.
-            if any(term in lower for term in ["sliding_window_table", "hin_segments", "hin_corridors"]):
-                continue
-            if "sliding" in lower or "hin" in lower:
-                folder = "sliding_windows"
-            else:
-                folder = "spatial_units_crashes"
-            add_report_table(zf, folder, table_name, table_obj)
+        # Geometry layers contain only their stable join key and geometry.  This
+        # avoids exporting every attribute a second time under GeoJSON.
+        add_df(
+            zf,
+            "geometry",
+            "sliding_windows_geometry",
+            geometry_only(windows_export, ["RouteID", "RouteName", "WindowID"]),
+            "Sliding-window geometry with existing Route and WindowID fields.",
+            geojson_only=True,
+        )
+        add_df(
+            zf,
+            "geometry",
+            "hin_segments_geometry",
+            geometry_only(hin_segments_export, "SegID"),
+            "HIN segment geometry with the existing workflow SegID.",
+            geojson_only=True,
+        )
+        add_df(
+            zf,
+            "geometry",
+            "spatial_units_geometry",
+            geometry_only(units_export, spatial_unit_export_id),
+            f"Spatial-unit geometry keyed by {spatial_unit_export_id}.",
+            geojson_only=True,
+        )
+        add_df(
+            zf,
+            "geometry",
+            "crash_assignments_geometry",
+            geometry_only(crashes_export, ["CrashID", "UnitID"]),
+            "Crash-point geometry with existing CrashID and UnitID fields.",
+            geojson_only=True,
+        )
+        # CLEAN EXPORT V3 END
 
-        # 4. Sliding windows / HIN: window table, HIN segments, and one route-level HIN corridor file.
-        results = st.session_state.get("section7_results")
-        if isinstance(results, dict):
-            add_df(
-                zf,
-                "sliding_windows",
-                "sliding_window_table",
-                add_hin_index_to_windows(results.get("risk_windows")),
-                "Sliding-window table with route, window, crash count, score, and HIN index.",
-            )
-            add_df(
-                zf,
-                "sliding_windows",
-                "hin_segments",
-                add_hin_index_to_windows(results.get("risk_segments")),
-                "HIN segment/window GeoJSON and table with HIN index.",
-            )
-            add_df(
-                zf,
-                "sliding_windows",
-                "hin_corridors",
-                build_route_hin_corridors(results),
-                "Route-level HIN corridor summary: one numeric CorridorID per route.",
-            )
-            # Do not export sliding_window_assigned_crashes. It is an internal intermediate table.
+        readme = """HIN clean generated-data export (version 3)
 
-        readme = """HIN generated data export
-
-This ZIP contains processed outputs generated by the app. It intentionally does not include original uploaded source files or raw uploaded crash files.
+This ZIP contains canonical analytical tables with distinct row grains. Original uploads, duplicate score aliases, renamed duplicates, and intermediate calculation tables are intentionally excluded.
 
 Folder structure
-- csv/roads and geojson/roads: analysis road segments only, including FromMile, ToMile, and SegmentLength_Mile when available.
-- csv/signals and geojson/signals: cleaned/de-duplicated signal points with SignalID, Latitude, Longitude, and City.
-- csv/spatial_units_crashes and geojson/spatial_units_crashes: final corridors, spatial-unit density results, crash points assigned to units, KABCO/report tables. The separate spatial_units table is not exported because the density results file contains the necessary unit attributes.
-- csv/sliding_windows and geojson/sliding_windows: sliding-window/HIN tables and geometries. The assigned-crash intermediate table is intentionally not exported.
+- csv/tables/sliding_window_table.csv: one row per sliding window, preserving the workflow Route and WindowID fields.
+- csv/tables/hin_segments.csv: one row per scored base segment, preserving workflow SegID. Risk_Score is excluded; HIN_Non_Normalized and HIN_Priority_Index are explicit.
+- csv/tables/report_table_sliding_window_route_summary.csv: one row per route with Assigned_EPDO, Max_HIN_Non_Normalized, and Max_HIN_Priority_Index.
+- csv/tables/spatial_units.csv: one row per crash-density spatial unit. UnitID is preserved exactly from density classification; KABCO counts are merged internally by UnitID.
+- csv/tables/crash_assignments.csv: one row per crash-to-unit assignment.
+- geojson/geometry: geometry layers preserve existing workflow IDs only—UnitID, Route/WindowID, SegID, and CrashID/UnitID.
+
+Notes
+- WindowID can repeat between routes; use the existing Route field together with WindowID when joining.
+- UnitID belongs to the crash-density process. SegID belongs to the sliding-window process; matching geometry does not automatically mean the IDs represent the same analytical record.
+- The exporter does not create fallback IDs, composite IDs, assignment IDs, or replacement IDs.
+- EPDO uses K=12, A=5, B=3, C=2, O=1 automatically when Crash Count is the selected scoring metric.
+- Selecting Crash Count still controls the HIN score; automatic EPDO calculation only fills export/report metrics.
+- CrashCount is the canonical spatial-unit total. The duplicate KABCO Total field is used only to fill missing CrashCount values and is not exported.
+- Route and field aliases are normalized to stable export names without changing analysis calculations.
 
 Manifest
 """
@@ -10295,4 +10584,3 @@ def _static_map_png(gdf, title="Map layer", overlay_layers=None):
         return buffer.getvalue()
     except Exception:
         return None
-

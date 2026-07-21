@@ -23,6 +23,17 @@ ROUTE_ALIAS_COLUMNS = [
     "NAME",
 ]
 
+# EXPORT METRICS V3: EPDO is always calculated for saved results, even when
+# Crash Count is the selected scoring metric. Custom UI weights still apply
+# when the user explicitly runs EPDO analysis.
+DEFAULT_EPDO_WEIGHTS = {
+    "K": 12,
+    "A": 5,
+    "B": 3,
+    "C": 2,
+    "O": 1,
+}
+
 
 def collapse_route_alias_columns(df):
     """Keep one user-facing route-name column named Route.
@@ -102,10 +113,8 @@ def section7_clean_risk_segments(
         "ToMile",
         "Crash_Count",
         "EPDO",
-        "Max_Window_Score",
-        "High_Risk_Score",
+        "HIN_Non_Normalized",
         "HIN_Priority_Index",
-        "Risk_Score",
         "Risk_Flag",
         "Risk_Class"
     ]
@@ -806,6 +815,7 @@ def score_segments(
         segs["EPDO"] = 0
         segs["Max_Window_Score"] = 0
         segs["High_Risk_Score"] = 0
+        segs["HIN_Non_Normalized"] = 0
         segs["HIN_Priority_Index"] = 0
         segs["Risk_Score"] = 0
         segs["Risk_Flag"] = False
@@ -910,6 +920,7 @@ def score_segments(
         segs["High_Risk_Score"],
         errors="coerce"
     ).fillna(0)
+    segs["HIN_Non_Normalized"] = segs["High_Risk_Score"]
     segs["Risk_Score"] = segs["HIN_Priority_Index"]
 
     positive_segments = segs[
@@ -1054,6 +1065,7 @@ def build_sliding_window_route_summary(
         max_crash_count = 0.0
         max_epdo = 0.0
         max_high_risk_score = 0.0
+        max_hin_non_normalized = 0.0
         max_hin_index = 0.0
 
         if not route_windows.empty:
@@ -1082,6 +1094,7 @@ def build_sliding_window_route_summary(
                     .fillna(0)
                     .max()
                 )
+                max_hin_non_normalized = max_high_risk_score
 
         assigned_crash_count = unique_crash_count(route_crashes)
         assigned_epdo = unique_epdo_total(route_crashes) if not route_crashes.empty else 0.0
@@ -1115,6 +1128,7 @@ def build_sliding_window_route_summary(
                 "Max_Window_Crash_Count": float(max_crash_count),
                 "Max_Window_EPDO": float(max_epdo),
                 "Max_High_Risk_Score": float(max_high_risk_score),
+                "Max_HIN_Non_Normalized": float(max_hin_non_normalized),
                 "Max_HIN_Priority_Index": float(max_hin_index),
             }
         )
@@ -1221,29 +1235,35 @@ def run_sliding_window_risk_analysis(
         crash_id_col=crash_id_col
     )
 
-    if risk_metric in [
-        "EPDO",
-        "EPDO Density"
-    ]:
-        if kabco_col is None:
-            raise ValueError(
-                "KABCO column is required for EPDO analysis."
-            )
+    # EXPORT METRICS V3: calculate EPDO on every run so saved EPDO columns do
+    # not fall back to crash count. Crash Count still controls Window_Score
+    # unless the user explicitly selects EPDO as the scoring metric.
+    resolved_kabco_col = kabco_col if kabco_col in crashes_route.columns else None
+    if resolved_kabco_col is None:
+        for candidate in [
+            "DashboardKABCO", "KABCO", "kabco", "Severity", "severity",
+            "CRASH_SEVERITY", "Crash Severity", "INJURY_SEVERITY",
+        ]:
+            if candidate in crashes_route.columns:
+                resolved_kabco_col = candidate
+                break
 
-        if epdo_weights is None:
-            epdo_weights = {
-                "K": 12,
-                "A": 5,
-                "B": 3,
-                "C": 2,
-                "O": 1
-            }
+    if risk_metric in ["EPDO", "EPDO Density"] and resolved_kabco_col is None:
+        raise ValueError("KABCO column is required for EPDO analysis.")
 
+    weights_for_run = (
+        epdo_weights
+        if risk_metric in ["EPDO", "EPDO Density"] and epdo_weights is not None
+        else DEFAULT_EPDO_WEIGHTS
+    )
+    if resolved_kabco_col is not None:
         crashes_route = apply_epdo(
             crashes_route,
-            kabco_col,
-            epdo_weights
+            resolved_kabco_col,
+            weights_for_run,
         )
+    else:
+        crashes_route["EPDO"] = 0.0
 
     risk_windows = create_sliding_windows(
         route_lines,
@@ -1258,6 +1278,17 @@ def run_sliding_window_risk_analysis(
         raise ValueError(
             "No sliding windows were created. Try reducing the window length."
         )
+
+    # Save both the raw score basis and its normalized 0-100 HIN index.
+    risk_windows["HIN_Non_Normalized"] = pd.to_numeric(
+        risk_windows["Window_Score"], errors="coerce"
+    ).fillna(0)
+    max_window_score = float(risk_windows["HIN_Non_Normalized"].max())
+    risk_windows["HIN_Priority_Index"] = (
+        risk_windows["HIN_Non_Normalized"] / max_window_score * 100.0
+        if max_window_score > 0
+        else 0.0
+    )
 
     risk_segments, risky_windows, risk_threshold = score_segments(
         base_segments,

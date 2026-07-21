@@ -1,3 +1,5 @@
+import pandas as pd
+
 from ui.map_view import make_json_safe_gdf
 from modules.sliding_window import section7_excel_bytes
 from .sliding_window import _ensure_hin_priority_columns
@@ -122,9 +124,26 @@ def _render_hin_downloads(st):
     risk_windows = results.get("risk_windows", None)
     risk_corridors = results.get("risk_corridors", None)
 
+    if "HIN_Non_Normalized" not in risk_segments.columns:
+        raw_col = next(
+            (
+                col for col in ["High_Risk_Score", "Max_Window_Score"]
+                if col in risk_segments.columns
+            ),
+            None,
+        )
+        risk_segments["HIN_Non_Normalized"] = (
+            pd.to_numeric(risk_segments[raw_col], errors="coerce").fillna(0)
+            if raw_col
+            else 0.0
+        )
+
     seg_table = _table_with_rank(
-        _drop_geometry(risk_segments),
-        ["HIN_Priority_Index", "Max_Window_Score", "EPDO", "Crash_Count"],
+        _drop_geometry(risk_segments).drop(
+            columns=["Risk_Score", "High_Risk_Score", "Max_Window_Score"],
+            errors="ignore",
+        ),
+        ["HIN_Priority_Index", "HIN_Non_Normalized", "EPDO", "Crash_Count"],
     )
     with st.expander("HIN risk segment table", expanded=True):
         st.dataframe(seg_table, width="stretch", hide_index=True)
