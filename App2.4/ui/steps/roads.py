@@ -24,6 +24,35 @@ def _candidate_road_class_columns(gdf):
     ]
 
 
+def _generate_mileposts_for_road_source(roads, route_col, segment_id_col):
+    """Generate and validate identical milepost fields for every road source."""
+    result = generate_from_to_mile(
+        roads=roads,
+        route_col=route_col,
+        segment_id_col=segment_id_col,
+        direction_method="Auto Detect",
+        start_mile=0.0,
+    )
+
+    required_output_columns = [
+        "FromMile",
+        "ToMile",
+        "SegmentLength_Mile",
+    ]
+    missing_output_columns = [
+        column_name
+        for column_name in required_output_columns
+        if column_name not in result.columns
+    ]
+    if missing_output_columns:
+        raise ValueError(
+            "Milepost generation did not create required field(s): "
+            + ", ".join(missing_output_columns)
+        )
+
+    return result
+
+
 def _clear_downstream_results_after_road_change():
     """Clear layers/results that depend on the analysis road network."""
 
@@ -471,7 +500,7 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                 key="places_file"
             )
 
-        if roads_file and places_file:
+        if roads_file:
 
             try:
                 roads = load_vector(
@@ -480,29 +509,62 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                     4326
                 )
 
-                places = load_vector(
-                    places_file,
-                    prefer_place=True
-                ).to_crs(
-                    4326
-                )
-
             except Exception as e:
                 st.error(
-                    "Unable to read one of the TIGER uploads. See the full error below."
+                    "Unable to read the TIGER roads upload. See the full error below."
                 )
                 st.exception(e)
                 st.stop()
 
             st.success(
-                "TIGER files loaded."
+                "TIGER roads loaded."
             )
 
             use_all_roads = st.checkbox(
-                "Use all roads without city clipping"
+                "Use all roads without city clipping",
+                key="tiger_use_all_roads"
             )
 
-            if not use_all_roads:
+            city_roads = None
+
+            if use_all_roads:
+
+                city_name = "All Roads"
+                area_name = city_name
+
+                st.session_state[
+                    "area_name"
+                ] = area_name
+
+                city_roads = roads.copy()
+
+                selected_boundary = gpd.GeoDataFrame(
+                    geometry=[
+                        roads.geometry.union_all().convex_hull
+                    ],
+                    crs=roads.crs
+                )
+
+            elif places_file:
+
+                try:
+                    places = load_vector(
+                        places_file,
+                        prefer_place=True
+                    ).to_crs(
+                        4326
+                    )
+
+                except Exception as e:
+                    st.error(
+                        "Unable to read the TIGER PLACE upload. See the full error below."
+                    )
+                    st.exception(e)
+                    st.stop()
+
+                st.success(
+                    "TIGER PLACE boundary loaded."
+                )
 
                 city_names = get_city_names_in_road_area(
                     places,
@@ -532,102 +594,97 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
 
             else:
 
-                city_name = "All Roads"
-                area_name = city_name
-
-                st.session_state[
-                    "area_name"
-                ] = area_name
-
-                city_roads = roads.copy()
-
-                selected_boundary = gpd.GeoDataFrame(
-                    geometry=[
-                        roads.geometry.union_all().convex_hull
-                    ],
-                    crs=roads.crs
+                st.info(
+                    "Upload the state PLACE file to clip roads by city, or select "
+                    "Use all roads without city clipping."
                 )
 
-            base_roads = city_roads.copy()
+            if city_roads is not None:
 
-            route_col = (
-                "FULLNAME"
-                if "FULLNAME" in base_roads.columns
-                else base_roads.columns[0]
-            )
+                base_roads = city_roads.copy()
 
-            segment_id_col = (
-                "LINEARID"
-                if "LINEARID" in base_roads.columns
-                else base_roads.columns[0]
-            )
-
-            st.session_state[
-                "selected_boundary"
-            ] = selected_boundary
-
-            st.session_state[
-                "route_col"
-            ] = route_col
-
-            st.session_state[
-                "segment_id_col"
-            ] = segment_id_col
-
-            if st.button(
-                "Generate FromMile and ToMile",
-                key="generate_tiger_from_to_mile"
-            ):
-
-                base_roads = generate_from_to_mile(
-                    roads=base_roads,
-                    route_col=route_col,
-                    segment_id_col=segment_id_col,
-                    direction_method="Auto Detect",
-                    start_mile=0.0
+                route_col = (
+                    "FULLNAME"
+                    if "FULLNAME" in base_roads.columns
+                    else base_roads.columns[0]
                 )
 
-                base_roads = base_roads.to_crs(
-                    4326
+                segment_id_col = (
+                    "LINEARID"
+                    if "LINEARID" in base_roads.columns
+                    else base_roads.columns[0]
                 )
-
-                st.session_state[
-                    "base_roads"
-                ] = base_roads
-
-                st.session_state[
-                    "selected_roads"
-                ] = base_roads
 
                 st.session_state[
                     "selected_boundary"
                 ] = selected_boundary
 
-                st.session_state.pop(
-                    "analysis_roads",
-                    None
-                )
-
-                st.session_state.pop(
-                    "analysis_road_filter_signature",
-                    None
-                )
-
-                _clear_downstream_results_after_road_change()
+                st.session_state[
+                    "route_col"
+                ] = route_col
 
                 st.session_state[
-                    "active_map_layer"
-                ] = "Roads"
+                    "segment_id_col"
+                ] = segment_id_col
 
-                st.success(
-                    "FromMile and ToMile generated."
-                )
+                if st.button(
+                    "Generate FromMile and ToMile",
+                    key="generate_tiger_from_to_mile"
+                ):
 
-            elif "base_roads" not in st.session_state:
+                    base_roads = _generate_mileposts_for_road_source(
+                        roads=base_roads,
+                        route_col=route_col,
+                        segment_id_col=segment_id_col
+                    )
 
-                st.info(
-                    "TIGER files loaded. Click Generate FromMile and ToMile."
-                )
+                    base_roads = base_roads.to_crs(
+                        4326
+                    )
+
+                    st.session_state[
+                        "base_roads"
+                    ] = base_roads
+
+                    st.session_state[
+                        "selected_roads"
+                    ] = base_roads
+
+                    st.session_state[
+                        "selected_boundary"
+                    ] = selected_boundary
+
+                    st.session_state.pop(
+                        "analysis_roads",
+                        None
+                    )
+
+                    st.session_state.pop(
+                        "analysis_road_filter_signature",
+                        None
+                    )
+
+                    _clear_downstream_results_after_road_change()
+
+                    st.session_state[
+                        "active_map_layer"
+                    ] = "Roads"
+
+                    st.success(
+                        "FromMile and ToMile generated."
+                    )
+
+                elif "base_roads" not in st.session_state:
+
+                    st.info(
+                        "TIGER roads are ready. Click Generate FromMile and ToMile."
+                    )
+
+        else:
+
+            st.info(
+                "Upload the county TIGER roads file to continue."
+            )
 
     # =====================================================
     # Option B: OSM no-upload workflow
@@ -998,12 +1055,10 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                     route_col = "RouteNameOSM"
                     segment_id_col = "OSMEdgeID"
 
-                    base_roads = generate_from_to_mile(
+                    base_roads = _generate_mileposts_for_road_source(
                         roads=analysis_osm_roads,
                         route_col=route_col,
-                        segment_id_col=segment_id_col,
-                        direction_method="Auto Detect",
-                        start_mile=0.0
+                        segment_id_col=segment_id_col
                     )
 
                     base_roads = base_roads.to_crs(
@@ -1159,12 +1214,10 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                 "Generate FromMile and ToMile"
             ):
 
-                base_roads = generate_from_to_mile(
+                base_roads = _generate_mileposts_for_road_source(
                     roads=roads,
                     route_col=route_col,
-                    segment_id_col=segment_id_col,
-                    direction_method=direction_method,
-                    start_mile=0.0
+                    segment_id_col=segment_id_col
                 )
 
                 base_roads = base_roads.to_crs(

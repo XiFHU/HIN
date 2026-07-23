@@ -4,6 +4,9 @@ import numpy as np
 from shapely.geometry import LineString, MultiLineString
 
 
+METERS_PER_MILE = 1609.344
+
+
 def _explode_lines(gdf):
     gdf = gdf.copy()
     gdf = gdf[gdf.geometry.notna()]
@@ -50,6 +53,18 @@ def _sort_segments_by_geometry(group, direction_method="Auto Detect"):
     return group, axis
 
 
+def _linear_unit_to_meters(crs):
+    """Return the CRS linear-unit conversion factor to meters."""
+    try:
+        factor = float(crs.axis_info[0].unit_conversion_factor)
+        if factor > 0:
+            return factor
+    except (AttributeError, IndexError, TypeError, ValueError):
+        pass
+
+    return 1.0
+
+
 def generate_from_to_mile(
     roads,
     route_col,
@@ -62,14 +77,34 @@ def generate_from_to_mile(
     if roads.crs is None:
         raise ValueError("Uploaded road layer has no CRS. Please define CRS before upload.")
 
+    missing_columns = [
+        column_name
+        for column_name in (route_col, segment_id_col)
+        if column_name not in roads.columns
+    ]
+    if missing_columns:
+        raise ValueError(
+            "Road layer is missing required column(s): "
+            + ", ".join(missing_columns)
+        )
+
     roads = _explode_lines(roads)
+    if roads.empty:
+        raise ValueError(
+            "Uploaded road layer does not contain any LineString or MultiLineString geometry."
+        )
 
     if roads.crs.is_geographic:
-        roads = roads.to_crs(roads.estimate_utm_crs())
+        projected_crs = roads.estimate_utm_crs()
+        if projected_crs is None:
+            projected_crs = "EPSG:3857"
+        roads = roads.to_crs(projected_crs)
+
+    linear_unit_to_meters = _linear_unit_to_meters(roads.crs)
 
     output_parts = []
 
-    for route_name, group in roads.groupby(route_col):
+    for route_name, group in roads.groupby(route_col, dropna=False):
         group = group.copy()
 
         group, axis = _sort_segments_by_geometry(
@@ -85,7 +120,11 @@ def generate_from_to_mile(
         route_orders = []
 
         for order_num, (_, row) in enumerate(group.iterrows(), start=1):
-            seg_len_mile = row.geometry.length / 5280.0
+            seg_len_mile = (
+                row.geometry.length
+                * linear_unit_to_meters
+                / METERS_PER_MILE
+            )
 
             from_mile = current_mile
             to_mile = current_mile + seg_len_mile
@@ -105,6 +144,9 @@ def generate_from_to_mile(
         group["SegmentLength_Mile"] = seg_lengths
 
         output_parts.append(group)
+
+    if not output_parts:
+        raise ValueError("No road routes were available for milepost generation.")
 
     out = pd.concat(output_parts, ignore_index=True)
     out = gpd.GeoDataFrame(out, geometry="geometry", crs=roads.crs)
