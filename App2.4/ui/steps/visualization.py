@@ -29,6 +29,7 @@ def _filter_by_crash_count(gdf, min_crash_count):
 
 def _render_crash_density_visualization(st_folium, workflow_context):
     globals().update(workflow_context)
+    sliding_window_ui.__dict__.update(workflow_context)
 
     spatial_units_map = st.session_state.get("spatial_units_density_map", None)
     assigned_crashes = st.session_state.get("assigned_crashes", None)
@@ -56,6 +57,34 @@ def _render_crash_density_visualization(st_folium, workflow_context):
         st.warning("No spatial units remain after the map filter. Lower the minimum crash count.")
         return
 
+    with f2:
+        display_units, density_selection_summary = (
+            sliding_window_ui._apply_ranked_selection_controls(
+                display_units,
+                selection_label="crash density",
+                item_label="spatial units",
+                all_option_label="All spatial units",
+                key_prefix="crash_density_display",
+                default_rank_col="CrashDensity",
+                rank_candidates=[
+                    "CrashDensity",
+                    "CrashCount",
+                    "Crash_Count",
+                    "EPDO",
+                    "KSI_Count",
+                    "Fatal_Injury_Count",
+                ],
+                capture_candidates=[
+                    "KSI_Count",
+                    "Fatal_Injury_Count",
+                    "CrashCount",
+                    "Crash_Count",
+                    "EPDO",
+                ],
+                analysis_help="This does not change the saved analysis results.",
+            )
+        )
+    st.caption(density_selection_summary)
 
     units_table = st.session_state.get("latest_results_units_table")
     if units_table is None:
@@ -790,7 +819,50 @@ def _render_high_risk_visualization(st_folium, workflow_context):
         st.warning("No High Risk Score segments remain after the map filter. Lower the minimum crash count.")
         return
 
+    with f2:
+        risk_segments_map, high_risk_selection_summary = (
+            sliding_window_ui._apply_ranked_selection_controls(
+                risk_segments_clean,
+                selection_label="High Risk Score",
+                item_label="segments",
+                all_option_label="All High Risk Score segments",
+                key_prefix="high_risk_display",
+                default_rank_col="HIN_Non_Normalized",
+                rank_candidates=[
+                    "HIN_Non_Normalized",
+                    "High_Risk_Score",
+                    "Max_Window_Score",
+                    "Crash_Count",
+                    "EPDO",
+                    "KSI_Count",
+                    "Fatal_Injury_Count",
+                ],
+                capture_candidates=[
+                    "KSI_Count",
+                    "Fatal_Injury_Count",
+                    "Crash_Count",
+                    "EPDO",
+                    "Max_Window_Score",
+                ],
+                analysis_help="This does not rerun the sliding-window analysis.",
+            )
+        )
+    st.caption(high_risk_selection_summary)
+
     risk_corridors_map = risk_corridors_clean
+    if (
+        risk_segments_map is not None
+        and not risk_segments_map.empty
+        and risk_corridors_clean is not None
+        and not risk_corridors_clean.empty
+        and "CorridorID" in risk_segments_map.columns
+        and "CorridorID" in risk_corridors_clean.columns
+    ):
+        selected_corridor_ids = set(risk_segments_map["CorridorID"].astype(str))
+        risk_corridors_map = risk_corridors_clean[
+            risk_corridors_clean["CorridorID"].astype(str).isin(selected_corridor_ids)
+        ].copy()
+
     with st.expander("Optional High Risk Score map style", expanded=False):
         risk_score_symbology = render_numeric_symbology_controls(
             "High Risk Score",
@@ -801,7 +873,7 @@ def _render_high_risk_visualization(st_folium, workflow_context):
     selected_layers = ["High Risk Score"]
     fmap = sliding_window_ui._make_segment_comparison_map(
         original_density=st.session_state.get("section7_original_density", None),
-        risk_segments=risk_segments_clean,
+        risk_segments=risk_segments_map,
         risk_corridors=risk_corridors_map,
         crashes=st.session_state.get("section7_crashes_for_map", st.session_state.get("crashes", None)),
         roads=selected_roads,
@@ -822,7 +894,7 @@ def _render_high_risk_visualization(st_folium, workflow_context):
         width="100%",
         key=(
             "viz_section7_high_risk_score_map_"
-            + str(len(risk_segments_clean) if risk_segments_clean is not None else 0)
+            + str(len(risk_segments_map) if risk_segments_map is not None else 0)
         ),
     )
 
