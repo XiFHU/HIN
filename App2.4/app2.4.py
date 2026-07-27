@@ -153,7 +153,7 @@ st.markdown(
     html, body, [data-testid="stAppViewContainer"] {
         height: 100vh;
         overflow: hidden;
-        font-size: 12px;
+        font-size: 14.5px;
     }
 
     .block-container {
@@ -171,7 +171,7 @@ st.markdown(
     }
 
     [data-testid="stSidebar"] {
-        min-width: 340px !important;
+        min-width: 390px !important;
         height: 100vh !important;
         max-height: 100vh !important;
         overflow: hidden !important;
@@ -231,7 +231,7 @@ st.markdown(
     }
 
     .hin-header {
-        height: 34px;
+        min-height: 42px;
         display: flex;
         align-items: center;
         gap: 10px;
@@ -242,20 +242,20 @@ st.markdown(
     }
 
     .hin-title {
-        font-size: 15px;
+        font-size: 19px;
         font-weight: 700;
         white-space: nowrap;
         margin-right: 8px;
     }
 
     .workflow-label {
-        font-size: 13px;
+        font-size: 16px;
         font-weight: 700;
         margin: 0.15rem 0 0.35rem 0;
     }
 
     .section-title {
-        font-size: 13px;
+        font-size: 16px;
         font-weight: 700;
         margin: 0.3rem 0 0.2rem 0;
         padding-bottom: 0.1rem;
@@ -274,12 +274,17 @@ st.markdown(
         gap: 0.15rem !important;
     }
 
-    h1 { font-size: 17px !important; margin: 0.2rem 0 !important; }
-    h2 { font-size: 15px !important; margin: 0.2rem 0 !important; }
-    h3 { font-size: 13px !important; margin: 0.15rem 0 !important; }
-    h4 { font-size: 12px !important; margin: 0.15rem 0 !important; }
+    h1 { font-size: 23px !important; margin: 0.25rem 0 !important; }
+    h2 { font-size: 20px !important; margin: 0.25rem 0 !important; }
+    h3 { font-size: 17px !important; margin: 0.2rem 0 !important; }
+    h4 { font-size: 15px !important; margin: 0.2rem 0 !important; }
     p, label, span, .stMarkdown, .stCaption, div[data-testid="stWidgetLabel"] {
-        font-size: 11.5px !important;
+        font-size: 14px !important;
+    }
+    input, textarea, button, [role="option"], [role="menuitem"],
+    [data-baseweb="select"] div, [data-baseweb="popover"] div,
+    [data-testid="stMetricLabel"], [data-testid="stMetricValue"] {
+        font-size: 14px !important;
     }
 
     .stRadio, .stCheckbox, .stSelectbox, .stMultiSelect, .stNumberInput, .stTextInput {
@@ -292,13 +297,13 @@ st.markdown(
 
     [data-testid="stFileUploaderDropzone"] {
         padding: 0.3rem !important;
-        min-height: 45px !important;
+        min-height: 56px !important;
     }
 
     .stButton button, .stDownloadButton button {
-        font-size: 11.5px !important;
-        padding: 0.16rem 0.45rem !important;
-        min-height: 27px !important;
+        font-size: 14px !important;
+        padding: 0.28rem 0.6rem !important;
+        min-height: 34px !important;
     }
 
     .stAlert {
@@ -352,17 +357,17 @@ st.markdown(
     div[data-testid="stExpander"] details summary {
         padding-top: 0.22rem !important;
         padding-bottom: 0.22rem !important;
-        font-size: 11.5px !important;
+        font-size: 14px !important;
     }
 
     .layer-sidebar-title {
-        font-size: 13px;
+        font-size: 16px;
         font-weight: 700;
         margin-bottom: 0.25rem;
     }
 
     .layer-sidebar-note {
-        font-size: 10.5px;
+        font-size: 13px;
         color: #666;
         margin-bottom: 0.35rem;
     }

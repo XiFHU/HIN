@@ -1533,7 +1533,7 @@ def make_section7_context_map(
         background-color: white;
         border: 2px solid black;
         padding: 10px;
-        font-size: 13px;
+        font-size: 15px;
     ">
         <b>HIN Priority Index (0-100)</b><br>
         <i style="background:#a6d96a;width:18px;height:12px;display:inline-block;"></i>

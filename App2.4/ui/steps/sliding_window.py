@@ -332,7 +332,7 @@ def _add_road_class_legend_to_map(fmap, color_lookup):
         padding: 7px 9px;
         border: 1px solid #888;
         border-radius: 4px;
-        font-size: 11px;
+        font-size: 13px;
         max-height: 240px;
         max-width: 260px;
         overflow-y: auto;
@@ -1429,7 +1429,7 @@ def _make_segment_comparison_map(
             """
             <style>
             .leaflet-control-layers {
-                font-size: 11px !important;
+                font-size: 13px !important;
                 max-width: 220px !important;
             }
             .leaflet-control-layers-expanded {

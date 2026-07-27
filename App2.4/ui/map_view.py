@@ -540,7 +540,7 @@ def make_map(
                     padding: 7px 9px;
                     border: 1px solid #888;
                     border-radius: 4px;
-                    font-size: 11px;
+                    font-size: 13px;
                     max-height: 240px;
                     max-width: 260px;
                     overflow-y: auto;
@@ -907,7 +907,7 @@ def make_map(
             """
             <style>
             .leaflet-control-layers {
-                font-size: 11px !important;
+                font-size: 13px !important;
                 max-width: 210px !important;
             }
             .leaflet-control-layers-expanded {

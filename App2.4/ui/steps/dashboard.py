@@ -691,7 +691,7 @@ def _style(st):
         }
         .block-container { padding-top: .65rem; padding-bottom: 6rem !important; max-width: 1900px; }
         [data-testid="stVerticalBlock"] { overflow: visible !important; }
-        .dashboard-scroll-note { color:#64748b; font-size:.86rem; margin-top:-.2rem; margin-bottom:.4rem; }
+        .dashboard-scroll-note { color:#64748b; font-size:1rem; margin-top:-.2rem; margin-bottom:.4rem; }
         .dashboard-hero {
             border-radius: 18px;
             padding: 1.0rem 1.2rem;
@@ -725,11 +725,11 @@ def _style(st):
         }
         .dashboard-section-title span {
             color: #4a5b53;
-            font-size: .88rem;
+            font-size: 1rem;
             font-weight: 450;
             margin-left: .45rem;
         }
-        .small-muted { color: #62716a; font-size: .9rem; }
+        .small-muted { color: #62716a; font-size: 1rem; }
         .dashboard-chart-card {
             border: 1px solid #e5e7eb;
             border-radius: 14px;
@@ -2286,7 +2286,7 @@ def _legend_html(title, min_value, max_value):
     return f"""
     <div style='position: fixed; bottom: 28px; right: 28px; z-index:9999;
          background: white; border: 1px solid #d1d5db; border-radius: 10px;
-         padding: 10px 12px; font-size: 12px; box-shadow: 0 6px 18px rgba(0,0,0,.12);'>
+         padding: 10px 12px; font-size: 14px; box-shadow: 0 6px 18px rgba(0,0,0,.12);'>
       <div style='font-weight:700; margin-bottom:6px;'>{html.escape(str(title))}</div>
       <div><span style='background:#16a34a;display:inline-block;width:14px;height:10px;margin-right:6px;'></span>Low ({min_label})</div>
       <div><span style='background:#facc15;display:inline-block;width:14px;height:10px;margin-right:6px;'></span>Moderate</div>
@@ -2933,7 +2933,7 @@ def _render_kpi_strip(st, crashes):
                 f"""
                 <div style='border:1px solid #e5e7eb;border-radius:14px;padding:13px 14px;background:#ffffff;box-shadow:0 1px 4px rgba(15,23,42,.05)'>
                   <div style='font-size:1.45rem'>{icon}</div>
-                  <div style='font-size:.80rem;color:#64748b'>{html.escape(label)}</div>
+                  <div style='font-size:1rem;color:#64748b'>{html.escape(label)}</div>
                   <div style='font-size:1.65rem;font-weight:700;color:#0f172a'>{int(value):,}</div>
                 </div>
                 """,
@@ -3182,7 +3182,7 @@ def _render_dashboard_map(st, map_name, gdf, key, highlight_value=None, height=4
     try:
         fmap.get_root().html.add_child(folium.Element("""
         <style>
-        .leaflet-control-layers {font-size:11px; max-height:170px; overflow:auto;}
+        .leaflet-control-layers {font-size:13px; max-height:190px; overflow:auto;}
         .leaflet-control-layers-expanded {padding:6px 8px;}
         .leaflet-control-layers label {margin-bottom:2px;}
         </style>
@@ -4891,7 +4891,7 @@ def _render_kpi_strip(st, crashes):
                 f"""
                 <div style='border:1px solid #e5e7eb;border-radius:14px;padding:13px 14px;background:#ffffff;box-shadow:0 1px 4px rgba(15,23,42,.05)'>
                   <div style='font-size:1.45rem'>{icon}</div>
-                  <div style='font-size:.80rem;color:#64748b'>{html.escape(label)}</div>
+                  <div style='font-size:1rem;color:#64748b'>{html.escape(label)}</div>
                   <div style='font-size:1.65rem;font-weight:700;color:#0f172a'>{html.escape(_format_kpi_value(value))}</div>
                 </div>
                 """,

@@ -366,7 +366,7 @@ class ClassedColorMap:
             padding: 8px 10px;
             border: 1px solid #888;
             border-radius: 4px;
-            font-size: 11px;
+            font-size: 13px;
             max-height: 220px;
             max-width: 285px;
             overflow-y: auto;
@@ -533,7 +533,7 @@ def add_categorical_legend(fmap, title, color_lookup, element_id="category-legen
         padding: 7px 9px;
         border: 1px solid #888;
         border-radius: 4px;
-        font-size: 11px;
+        font-size: 13px;
         max-height: {max_height}px;
         max-width: 270px;
         overflow-y: auto;
