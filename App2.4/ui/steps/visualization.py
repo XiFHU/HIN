@@ -240,7 +240,7 @@ def _render_summary_visualization(st_folium, workflow_context):
     if not numeric_cols:
         st.warning("No numeric crash-density fields are available for summary mapping.")
         return
-    c1, c2 = st.columns([0.35, 0.65])
+    c1 = st.container()
     with c1:
         metric = st.selectbox("Summary metric", numeric_cols, key="summary_map_metric")
         summary_type = st.selectbox("Summary statistic", ["Value map", "Above average", "Above median"], key="summary_map_type")
@@ -583,7 +583,7 @@ def _render_score_summary_visualization(
 
     metric = preferred_metric
 
-    c1, c2 = st.columns([0.35, 0.65])
+    c1 = st.container()
 
     with c1:
         summary_type = st.selectbox(
