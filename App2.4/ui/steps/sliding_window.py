@@ -2,6 +2,7 @@
 
 from modules.crash_density import resolve_crash_id_col
 
+from ..map_view import add_crash_density_legend
 from ..map_symbology import (
     add_categorical_legend,
     categorical_color_lookup,
@@ -1243,7 +1244,7 @@ def _make_segment_comparison_map(
                 ) if tooltip_fields else None
             ).add_to(fmap)
 
-            density_cmap.add_to(fmap)
+            add_crash_density_legend(fmap, density_cmap)
 
     if "Risk Corridors" in selected_layers:
         risk_corridors = clean_for_map(risk_corridors)

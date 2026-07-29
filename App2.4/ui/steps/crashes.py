@@ -277,15 +277,11 @@ def _clip_crashes_to_boundary(crashes, selected_boundary):
         return crashes
 
 
-def _render_crash_filters(crashes, source_key="crash"):
+def _render_crash_filters_content(crashes, source_key="crash"):
     if crashes is None:
         return crashes
 
     crashes = crashes.copy()
-
-    st.markdown(
-        "**Crash data filters**"
-    )
 
     def _clean_key(value):
         return (
@@ -536,7 +532,14 @@ def _render_crash_filters(crashes, source_key="crash"):
 
     return crashes
 
-def _render_data_size_and_quality_notes():
+
+def _render_crash_filters(crashes, source_key="crash"):
+    """Keep optional crash filters collapsed until the user chooses to refine data."""
+    with st.expander("Crash data filters", expanded=False):
+        return _render_crash_filters_content(crashes, source_key=source_key)
+
+
+def render_data_size_and_quality_notes():
     with st.expander("App limits and data quality notes", expanded=False):
         st.markdown(
             """
@@ -552,8 +555,6 @@ def _render_data_size_and_quality_notes():
 
 def render_crashes_step(st_folium, workflow_context, spatial_unit=None):
     globals().update(workflow_context)
-
-    _render_data_size_and_quality_notes()
 
     selected_roads = st.session_state.get("selected_roads", None)
     roads_class_display = st.session_state.get("roads_class_display", None)

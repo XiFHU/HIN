@@ -1,5 +1,6 @@
 """Folium map utilities for the HIN Streamlit app."""
 
+import html
 import io
 import zipfile
 
@@ -12,18 +13,106 @@ import geopandas as gpd
 from .layer_manager import is_layer_visible
 from .map_symbology import add_categorical_legend, categorical_color_lookup, crash_marker_style
 
+
+def add_crash_density_legend(fmap, density_cmap):
+    """Add the original horizontal crash-density bar at the map's top-right."""
+
+    if density_cmap is None or getattr(fmap, "_hin_density_legend_added", False):
+        return fmap
+
+    fmap._hin_density_legend_added = True
+
+    breaks = getattr(density_cmap, "breaks", None)
+    if breaks:
+        vmin = float(breaks[0])
+        vmax = float(breaks[-1])
+    else:
+        vmin = float(getattr(density_cmap, "vmin", 0.0))
+        vmax = float(getattr(density_cmap, "vmax", vmin + 1.0))
+
+    if vmax <= vmin:
+        vmax = vmin + 1.0
+
+    sample_values = [
+        vmin + ((vmax - vmin) * i / 6.0)
+        for i in range(7)
+    ]
+    sample_colors = [density_cmap(value) for value in sample_values]
+    gradient = ", ".join(
+        f"{color} {index * 100 / (len(sample_colors) - 1):.2f}%"
+        for index, color in enumerate(sample_colors)
+    )
+
+    def format_value(value):
+        return f"{float(value):,.2f}".rstrip("0").rstrip(".")
+
+    midpoint = vmin + ((vmax - vmin) / 2.0)
+    caption = html.escape(
+        str(getattr(density_cmap, "caption", "Crash Density"))
+    )
+
+    legend_html = f"""
+    <div id="crash-density-legend" role="img"
+         aria-label="{caption}" style="
+        position: absolute;
+        top: 10px;
+        right: 64px;
+        z-index: 12025;
+        box-sizing: border-box;
+        width: min(330px, calc(100% - 132px));
+        min-width: 170px;
+        padding: 7px 10px 6px;
+        border: 1px solid rgba(0, 0, 0, 0.35);
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.96);
+        box-shadow: 0 1px 5px rgba(0, 0, 0, 0.24);
+        color: #111827;
+        font: 11px/1.2 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    ">
+        <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+            <span>{format_value(vmin)}</span>
+            <span>{format_value(midpoint)}</span>
+            <span>{format_value(vmax)}</span>
+        </div>
+        <div style="
+            height: 10px;
+            border: 1px solid rgba(0,0,0,0.30);
+            background: linear-gradient(to right, {gradient});
+        "></div>
+        <div style="
+            margin-top: 3px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 11px;
+        " title="{caption}">{caption}</div>
+    </div>
+    """
+
+    fmap.get_root().html.add_child(folium.Element(legend_html))
+    return fmap
+
+
 def add_map_elements(fmap):
+    """Add responsive, always-reachable map controls once per Folium map."""
+
+    if getattr(fmap, "_hin_map_elements_added", False):
+        return fmap
+
+    fmap._hin_map_elements_added = True
 
     folium.plugins.MeasureControl(
-        position="bottomleft",
+        position="bottomright",
         primary_length_unit="miles",
-        secondary_length_unit="feet"
+        secondary_length_unit="feet",
+        primary_area_unit="sqmiles",
+        secondary_area_unit="acres",
     ).add_to(fmap)
 
     # Compact north arrow. No background box, and placed below the Leaflet
     # layer control so it does not block the layer toggle.
     north_arrow_html = """
-    <div style="
+    <div id="hin-north-arrow" style="
         position: fixed;
         top: 118px;
         right: 22px;
@@ -47,55 +136,282 @@ def add_map_elements(fmap):
         folium.Element(north_arrow_html)
     )
 
-    # Branca LinearColormap legends default to top-right and can overlap the
-    # layer control. Move all color-ramp legends to the bottom-right and make
-    # them fit inside the visible map width. Keep captions short in
-    # map_symbology.py so Folium/Leaflet does not clip the end of the legend.
-    legend_position_script = """
+    # Collect every custom/Branca legend into one scrollable panel. On narrow
+    # maps the panel starts collapsed behind a clearly visible Legend button;
+    # the measure button remains independently reachable at bottom-left.
+    responsive_controls = """
+    <style>
+    .leaflet-control-measure,
+    .leaflet-top.leaflet-left,
+    .leaflet-bottom.leaflet-left,
+    .leaflet-bottom.leaflet-right {
+        display: block !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        z-index: 12020 !important;
+    }
+    .leaflet-container {
+        height: 100vh !important;
+        min-height: 320px !important;
+    }
+    .leaflet-control-measure-interaction {
+        box-sizing: border-box !important;
+        max-width: calc(100vw - 24px) !important;
+        max-height: calc(100vh - 90px) !important;
+        overflow: auto !important;
+    }
+    .leaflet-control-layers {
+        box-sizing: border-box !important;
+        max-width: min(260px, calc(100vw - 24px)) !important;
+        max-height: calc(100vh - 84px) !important;
+        overflow: auto !important;
+        z-index: 12010 !important;
+    }
+    #hin-legend-toggle {
+        position: absolute;
+        right: 10px;
+        bottom: 10px;
+        z-index: 12030;
+        min-width: 76px;
+        min-height: 36px;
+        padding: 7px 10px;
+        border: 1px solid rgba(0, 0, 0, 0.35);
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.97);
+        color: #1f2937;
+        font: 600 13px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        box-shadow: 0 1px 5px rgba(0, 0, 0, 0.25);
+        cursor: pointer;
+    }
+    #hin-legend-panel {
+        position: absolute;
+        right: 10px;
+        bottom: 54px;
+        z-index: 12025;
+        box-sizing: border-box;
+        width: min(340px, calc(100% - 24px));
+        max-height: min(52%, 430px);
+        overflow: auto;
+        padding: 8px;
+        border: 1px solid rgba(0, 0, 0, 0.30);
+        border-radius: 5px;
+        background: rgba(255, 255, 255, 0.97);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.24);
+    }
+    #hin-legend-panel[hidden] {
+        display: none !important;
+    }
+    #hin-legend-panel .hin-map-legend {
+        position: static !important;
+        inset: auto !important;
+        display: block !important;
+        box-sizing: border-box !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        max-height: none !important;
+        margin: 0 0 8px 0 !important;
+        padding: 6px !important;
+        overflow: visible !important;
+        transform: none !important;
+        border: 0 !important;
+        border-bottom: 1px solid #d1d5db !important;
+        border-radius: 0 !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        font-size: 12px !important;
+    }
+    #hin-legend-panel .hin-map-legend:last-child {
+        margin-bottom: 0 !important;
+        border-bottom: 0 !important;
+    }
+    #hin-legend-panel .hin-map-legend svg {
+        display: block !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        height: auto !important;
+        overflow: visible !important;
+    }
+    /* streamlit-folium does not execute every custom HTML script. These
+       fallback positions keep every legend visible even when the unified
+       legend panel cannot initialize. */
+    body:not(.hin-responsive-ready) #road-class-legend {
+        position: absolute !important;
+        top: 210px !important;
+        right: 10px !important;
+        bottom: auto !important;
+        left: auto !important;
+        box-sizing: border-box !important;
+        width: min(250px, calc(50% - 18px)) !important;
+        max-width: calc(50% - 18px) !important;
+        max-height: min(24vh, 140px) !important;
+        overflow: auto !important;
+        z-index: 12000 !important;
+    }
+    body:not(.hin-responsive-ready) #crash-color-legend,
+    body:not(.hin-responsive-ready) #section7-crash-color-legend,
+    body:not(.hin-responsive-ready) #category-legend {
+        position: absolute !important;
+        top: 110px !important;
+        right: 10px !important;
+        bottom: auto !important;
+        left: auto !important;
+        box-sizing: border-box !important;
+        width: min(250px, calc(50% - 18px)) !important;
+        max-width: calc(50% - 18px) !important;
+        max-height: min(24vh, 140px) !important;
+        overflow: auto !important;
+        z-index: 12000 !important;
+    }
+    body:not(.hin-responsive-ready) #numeric-classed-legend,
+    body:not(.hin-responsive-ready) .legend.leaflet-control {
+        position: absolute !important;
+        top: 310px !important;
+        right: 10px !important;
+        bottom: auto !important;
+        left: auto !important;
+        box-sizing: border-box !important;
+        width: min(330px, calc(100% - 78px)) !important;
+        max-width: calc(100% - 78px) !important;
+        max-height: min(20vh, 110px) !important;
+        overflow: auto !important;
+        transform: none !important;
+        z-index: 12000 !important;
+    }
+    body:not(.hin-responsive-ready) .legend.leaflet-control svg {
+        width: 100% !important;
+        max-width: 100% !important;
+        height: auto !important;
+        overflow: visible !important;
+    }
+    @media (max-width: 680px), (max-height: 560px) {
+        #hin-legend-panel {
+            width: min(300px, calc(100% - 62px));
+            max-height: calc(100% - 118px);
+            padding: 6px;
+        }
+        #hin-legend-toggle {
+            min-height: 34px;
+            padding: 6px 9px;
+            font-size: 12px;
+        }
+        #hin-north-arrow {
+            top: 64px !important;
+            right: 18px !important;
+            font-size: 17px !important;
+        }
+        body:not(.hin-responsive-ready) #road-class-legend,
+        body:not(.hin-responsive-ready) #crash-color-legend,
+        body:not(.hin-responsive-ready) #section7-crash-color-legend,
+        body:not(.hin-responsive-ready) #category-legend {
+            width: calc(50% - 16px) !important;
+            max-width: calc(50% - 16px) !important;
+            max-height: 28vh !important;
+            font-size: 11px !important;
+        }
+        .leaflet-control-layers {
+            max-width: min(220px, calc(100vw - 64px)) !important;
+            font-size: 12px !important;
+        }
+    }
+    </style>
     <script>
     (function() {
-        function positionColorLegends() {
-            var mapEl = document.querySelector('.folium-map') || document.body;
-            var mapWidth = mapEl.clientWidth || window.innerWidth || 420;
-            var legendWidth = Math.min(430, Math.max(260, mapWidth - 36));
+        function setupResponsiveMapControls() {
+            var mapEl = document.querySelector('.leaflet-container');
+            if (!mapEl) return;
+            document.body.classList.add('hin-responsive-ready');
+
+            var panel = document.getElementById('hin-legend-panel');
+            var toggle = document.getElementById('hin-legend-toggle');
+
+            if (!panel) {
+                panel = document.createElement('div');
+                panel.id = 'hin-legend-panel';
+                panel.setAttribute('role', 'region');
+                panel.setAttribute('aria-label', 'Map legends');
+                mapEl.appendChild(panel);
+            }
+
+            if (!toggle) {
+                toggle = document.createElement('button');
+                toggle.id = 'hin-legend-toggle';
+                toggle.type = 'button';
+                toggle.setAttribute('aria-controls', 'hin-legend-panel');
+                mapEl.appendChild(toggle);
+                toggle.addEventListener('click', function() {
+                    panel.hidden = !panel.hidden;
+                    panel.dataset.userToggled = 'true';
+                    updateButton();
+                });
+            }
+
+            var selector = [
+                '#road-class-legend',
+                '#crash-color-legend',
+                '#section7-crash-color-legend',
+                '#category-legend',
+                '#numeric-classed-legend',
+                '.legend.leaflet-control'
+            ].join(',');
+
             var legends = Array.prototype.slice.call(
-                document.querySelectorAll('.legend.leaflet-control')
+                document.querySelectorAll(selector)
             );
-            legends.forEach(function(el, i) {
-                el.style.position = 'fixed';
-                el.style.right = '12px';
-                el.style.left = 'auto';
-                el.style.top = 'auto';
-                el.style.bottom = (18 + i * 72) + 'px';
-                el.style.zIndex = '9997';
-                el.style.background = 'rgba(255,255,255,0.88)';
-                el.style.padding = '3px 5px';
-                el.style.border = '1px solid rgba(0,0,0,0.25)';
-                el.style.borderRadius = '3px';
-                el.style.width = legendWidth + 'px';
-                el.style.maxWidth = 'calc(100vw - 28px)';
-                el.style.overflow = 'visible';
-                el.style.transform = 'scale(0.72)';
-                el.style.transformOrigin = 'bottom right';
-                el.style.boxShadow = '0 1px 3px rgba(0,0,0,0.2)';
-                var svg = el.querySelector('svg');
-                if (svg) {
-                    svg.setAttribute('width', legendWidth);
-                    svg.style.width = '100%';
-                    svg.style.maxWidth = '100%';
-                    svg.style.overflow = 'visible';
-                }
+
+            legends.forEach(function(el) {
+                if (el === panel || panel.contains(el)) return;
+                el.classList.add('hin-map-legend');
+                panel.appendChild(el);
             });
+
+            var hasLegends = panel.children.length > 0;
+            toggle.style.display = hasLegends ? 'block' : 'none';
+            panel.style.display = hasLegends ? '' : 'none';
+
+            var compact = mapEl.clientWidth <= 680 || mapEl.clientHeight <= 560;
+            if (!panel.dataset.userToggled) {
+                panel.hidden = compact;
+            }
+
+            function updateButton() {
+                toggle.textContent = panel.hidden ? 'Legend' : 'Hide legend';
+                toggle.setAttribute('aria-expanded', panel.hidden ? 'false' : 'true');
+                toggle.title = panel.hidden ? 'Show map legends' : 'Hide map legends';
+            }
+
+            updateButton();
         }
-        setTimeout(positionColorLegends, 350);
-        setTimeout(positionColorLegends, 1000);
-        window.addEventListener('resize', positionColorLegends);
+        setTimeout(setupResponsiveMapControls, 250);
+        setTimeout(setupResponsiveMapControls, 800);
+        setTimeout(setupResponsiveMapControls, 1600);
+        window.addEventListener('resize', setupResponsiveMapControls);
     })();
     </script>
     """
 
-    fmap.get_root().html.add_child(
-        folium.Element(legend_position_script)
+    responsive_style = responsive_controls.split(
+        "<style>",
+        1,
+    )[1].split(
+        "</style>",
+        1,
+    )[0]
+    responsive_script = responsive_controls.split(
+        "<script>",
+        1,
+    )[1].split(
+        "</script>",
+        1,
+    )[0]
+
+    fmap.get_root().header.add_child(
+        folium.Element("<style>" + responsive_style + "</style>")
+    )
+    # streamlit-folium injects HTML fragments dynamically, so <script> tags
+    # placed in the HTML fragment do not execute. Adding JavaScript to Folium's
+    # script section makes the responsive legend controller run reliably.
+    fmap.get_root().script.add_child(
+        folium.Element(responsive_script)
     )
 
     return fmap
@@ -740,7 +1056,11 @@ def make_map(
         ).add_to(spatial_units_group)
 
         spatial_units_group.add_to(fmap)
-        
+
+        # Keep the mapped color scale and its legend together. This explicit
+        # legend is used by every crash-density map, including the immediate
+        # "Show Results" map and both Visualization crash-density views.
+        add_crash_density_legend(fmap, density_cmap)
 
     signals = clean_for_map(signals)
 
@@ -923,5 +1243,5 @@ def make_map(
         position="topright"
     ).add_to(fmap)
 
-    return fmap
+    return add_map_elements(fmap)
 

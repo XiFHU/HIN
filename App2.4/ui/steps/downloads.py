@@ -379,9 +379,6 @@ def render_results_downloads(
         crash_color_settings=crash_color_settings,
     )
 
-    if spatial_units_layer is not None:
-        density_cmap.add_to(fmap)
-
     fmap = add_map_elements(fmap)
 
     map_result = st_folium(

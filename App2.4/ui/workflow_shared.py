@@ -8,7 +8,7 @@ Optional settings expanders in each step.
 from .steps.roads import render_roads_step
 from .steps.signals import render_signals_step
 from .steps.corridors import render_corridors_step
-from .steps.crashes import render_crashes_step
+from .steps.crashes import render_crashes_step, render_data_size_and_quality_notes
 from .steps.results import render_results_step
 from .steps.sliding_window import render_sliding_window_step
 from .steps.visualization import render_visualization_step
@@ -55,14 +55,6 @@ def render_workflow(spatial_unit, st_folium, workflow_context):
     st = workflow_context["st"]
     status = _workflow_status(st)
 
-    with st.expander("App limits and data quality notes", expanded=False):
-        st.caption(
-            "Large road/crash datasets can be slow, especially on Streamlit Cloud. "
-            "Clip to the study boundary early, use road-class filters for very large OSM/TIGER networks, "
-            "and avoid drawing huge result layers all at once. OSM traffic signals and road classes are crowd-sourced, "
-            "so signal completeness and classification accuracy vary by location."
-        )
-
     data_expanded = (
         not status["roads"]
         or bool(st.session_state.get("road_class_layer_enabled", False))
@@ -83,21 +75,21 @@ def render_workflow(spatial_unit, st_folium, workflow_context):
                 render_corridors_step(st_folium, workflow_context, spatial_unit=spatial_unit)
 
     analysis_expanded = status["roads"] and status["crashes"] and not status["results"]
-    with st.expander("Analysis", expanded=analysis_expanded):
-        if spatial_unit == "Segment":
+    with st.expander("Crash density analysis", expanded=analysis_expanded):
+        render_results_step(st_folium, workflow_context, spatial_unit=spatial_unit)
+
+    if spatial_unit == "Segment":
+        with st.expander("HIN analysis", expanded=False):
             st.caption(
-                "First create the segment crash-density layer, then run Sliding Window HIN. "
-                "Crash-density maps remain available in Visualization."
+                "Run the sliding-window analysis after creating the segment crash-density results."
             )
-            render_results_step(st_folium, workflow_context, spatial_unit=spatial_unit)
-            st.divider()
             st.session_state["defer_sliding_window_maps"] = True
             render_sliding_window_step(st_folium, workflow_context, spatial_unit=spatial_unit)
-        else:
-            render_results_step(st_folium, workflow_context, spatial_unit=spatial_unit)
 
     with st.expander("Visualization", expanded=status["results"]):
         render_visualization_step(st_folium, workflow_context, spatial_unit=spatial_unit)
 
     with st.expander("Results tables and downloads", expanded=status["results"]):
         render_final_outputs_step(workflow_context, spatial_unit=spatial_unit)
+
+    render_data_size_and_quality_notes()

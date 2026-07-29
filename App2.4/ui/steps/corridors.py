@@ -409,7 +409,7 @@ def render_corridors_step(st_folium, workflow_context, spatial_unit=None):
     elif selected_roads is None:
 
         st.info(
-            "Generate FromMile and ToMile before building corridors."
+            "Return to Road data source and finish loading the road network before building corridors."
         )
 
     elif signals_clean is None:

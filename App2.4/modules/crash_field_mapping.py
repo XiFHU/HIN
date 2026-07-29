@@ -445,7 +445,7 @@ def render_field_mapping_ui(st, df, key_prefix="crash_field_mapping"):
         st.session_state[state_key] = _apply_fars_mapping_defaults(df, st.session_state[state_key])
 
     columns = [""] + [c for c in df.columns if str(c).lower() != "geometry"]
-    with st.expander("Crash field mapping", expanded=False):
+    with st.expander("Crash field mapping", expanded=True):
         st.caption(
             "The app auto-detects common crash fields, but different agencies use different column names. "
             "Confirm or change these fields once, then the same mapping is used by filters, dashboards, and reports."

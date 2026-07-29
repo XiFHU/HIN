@@ -66,17 +66,6 @@ def render_classification_step(workflow_context, spatial_unit=None):
     )
     crashes = st.session_state.get("crashes", None)
 
-    if spatial_unit == "Intersection":
-        st.markdown(
-            '<div class="section-title">Signalized Intersection Crash Classification</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            '<div class="section-title">Classification / Spatial Units</div>',
-            unsafe_allow_html=True,
-        )
-
     from modules.crash_classification import (
         create_intersection_units,
         create_corridor_units,
@@ -94,8 +83,6 @@ def render_classification_step(workflow_context, spatial_unit=None):
         "Corridor": "Corridor crashes",
         "Segment": "Road segment crashes",
     }[spatial_unit]
-
-    st.info(f"Current spatial unit: {crash_analysis_type}")
 
     if crash_analysis_type == "Signalized intersection crashes":
         if selected_roads is None:
@@ -284,7 +271,7 @@ def render_classification_step(workflow_context, spatial_unit=None):
                 st.success("Road segment crashes classified.")
 
         elif segment_unit_method == "Use uploaded road segments":
-            if st.button("Classify Uploaded Road Segment Crashes", key="classify_uploaded_segment_crashes"):
+            if st.button("Show Results for All Spatial Units", key="classify_uploaded_segment_crashes"):
                 spatial_units = roads_for_segments.copy()
 
                 # TIGER LINEARID and some uploaded road ID fields are not always

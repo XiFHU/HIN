@@ -399,6 +399,22 @@ st.markdown(
         max-width: 100% !important;
     }
 
+    /* Keep the full Leaflet control surface inside the visible browser height.
+       The map used to remain 860px tall on short screens, which placed the
+       bottom-left measurement tool and lower legends below the viewport. */
+    iframe[title="streamlit_folium.st_folium"] {
+        height: calc(100vh - 3.25rem) !important;
+        min-height: 320px !important;
+        max-height: calc(100vh - 3.25rem) !important;
+    }
+
+    @media (max-height: 620px) {
+        iframe[title="streamlit_folium.st_folium"] {
+            height: calc(100vh - 2.5rem) !important;
+            max-height: calc(100vh - 2.5rem) !important;
+        }
+    }
+
     </style>
     """,
     unsafe_allow_html=True

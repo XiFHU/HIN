@@ -449,7 +449,7 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
     globals().update(workflow_context)
 
     road_source = st.radio(
-        "Choose road source",
+        "Road data source",
         [
             "Upload custom road network",
             "Use TIGER roads + PLACE boundary",
@@ -460,6 +460,9 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
     )
 
     st.session_state["road_source_label"] = road_source
+    st.caption(
+        "FromMile / ToMile will be generated automatically from route geometry."
+    )
 
     roads = None
     places = None
@@ -627,11 +630,19 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                     "segment_id_col"
                 ] = segment_id_col
 
-                if st.button(
-                    "Generate FromMile and ToMile",
-                    key="generate_tiger_from_to_mile"
-                ):
+                tiger_milepost_signature = (
+                    getattr(roads_file, "name", ""),
+                    getattr(roads_file, "size", None),
+                    str(city_name),
+                    bool(use_all_roads),
+                    str(route_col),
+                    str(segment_id_col),
+                )
 
+                if (
+                    st.session_state.get("tiger_milepost_signature")
+                    != tiger_milepost_signature
+                ):
                     base_roads = _generate_mileposts_for_road_source(
                         roads=base_roads,
                         route_col=route_col,
@@ -670,15 +681,16 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                         "active_map_layer"
                     ] = "Roads"
 
+                    st.session_state[
+                        "tiger_milepost_signature"
+                    ] = tiger_milepost_signature
+
                     st.success(
-                        "FromMile and ToMile generated."
+                        "TIGER roads loaded. FromMile and ToMile were generated automatically."
                     )
 
-                elif "base_roads" not in st.session_state:
-
-                    st.info(
-                        "TIGER roads are ready. Click Generate FromMile and ToMile."
-                    )
+                else:
+                    base_roads = st.session_state.get("base_roads", base_roads)
 
         else:
 
@@ -969,7 +981,8 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                 _clear_downstream_results_after_road_change()
 
                 st.success(
-                    f"Downloaded {len(roads):,} OSM road edges. Review the highway mapping, then generate FromMile and ToMile."
+                    f"Downloaded {len(roads):,} OSM road edges. Review the highway mapping; "
+                    "FromMile and ToMile will update automatically."
                 )
 
             except Exception as e:
@@ -1032,11 +1045,15 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                     key="osm_roads_preview_map"
                 )
 
-            if st.button(
-                "Apply OSM mapping and Generate FromMile and ToMile",
-                key="generate_osm_from_to_mile"
-            ):
+            osm_milepost_signature = (
+                len(osm_raw_roads),
+                tuple(sorted((str(k), str(v)) for k, v in osm_mapping.items())),
+            )
 
+            if (
+                st.session_state.get("osm_milepost_signature")
+                != osm_milepost_signature
+            ):
                 mapped_roads = mapped_roads_preview.copy()
 
                 omitted_count = int(
@@ -1107,16 +1124,18 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                     _clear_downstream_results_after_road_change()
 
                     st.session_state["active_map_layer"] = "Roads"
+                    st.session_state[
+                        "osm_milepost_signature"
+                    ] = osm_milepost_signature
 
                     st.success(
-                        f"OSM FromMile and ToMile generated for {len(base_roads):,} analysis road segments. "
+                        f"OSM mapping applied and FromMile / ToMile generated automatically "
+                        f"for {len(base_roads):,} analysis road segments. "
                         f"Omitted OSM edges: {omitted_count:,}."
                     )
 
-            elif "base_roads" not in st.session_state:
-                st.info(
-                    "Review the OSM highway mapping, then click Apply OSM mapping and Generate FromMile and ToMile."
-                )
+            else:
+                base_roads = st.session_state.get("base_roads", base_roads)
 
     # =====================================================
     # Option C: Custom uploaded road network
@@ -1203,17 +1222,22 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                 key="custom_segment_id_col"
             )
 
-            # Use automatic route ordering only. The previous East-West / North-South
-            # choices confused users and usually produced the same practical result.
-            direction_method = "Auto Detect"
-            st.caption(
-                "FromMile / ToMile will be generated automatically from route geometry."
+            custom_milepost_signature = (
+                tuple(
+                    (
+                        getattr(upload, "name", ""),
+                        getattr(upload, "size", None),
+                    )
+                    for upload in custom_road_files
+                ),
+                str(route_col),
+                str(segment_id_col),
             )
 
-            if st.button(
-                "Generate FromMile and ToMile"
+            if (
+                st.session_state.get("custom_milepost_signature")
+                != custom_milepost_signature
             ):
-
                 base_roads = _generate_mileposts_for_road_source(
                     roads=roads,
                     route_col=route_col,
@@ -1267,16 +1291,16 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
                     "active_map_layer"
                 ] = "Roads"
 
+                st.session_state[
+                    "custom_milepost_signature"
+                ] = custom_milepost_signature
+
                 st.success(
-                    "FromMile and ToMile generated."
+                    "Road data loaded. FromMile and ToMile were generated automatically."
                 )
 
             else:
-
-                if "base_roads" not in st.session_state:
-                    st.info(
-                        "Select fields, then click Generate FromMile and ToMile."
-                    )
+                base_roads = st.session_state.get("base_roads", base_roads)
 
     if base_roads is None:
 
@@ -1355,72 +1379,6 @@ def render_roads_step(st_folium, workflow_context, spatial_unit=None):
         st.session_state[
             "selected_roads"
         ] = analysis_roads
-
-        col_reset1, col_reset2 = st.columns(2)
-
-        with col_reset1:
-
-            if st.button(
-                "Reset analysis results"
-            ):
-
-                _clear_downstream_results_after_road_change()
-
-                st.rerun()
-
-        with col_reset2:
-
-            if st.button(
-                "Reset roads and start over"
-            ):
-
-                for k in [
-                    "base_roads",
-                    "selected_roads",
-                    "selected_boundary",
-                    "analysis_roads",
-                    "analysis_road_class_col",
-                    "analysis_road_class_values",
-                    "analysis_road_filter_signature",
-                    "roads_map_display",
-                    "roads_class_display",
-                    "road_class_viz_col",
-                    "road_class_viz_values",
-                    "road_class_layer_enabled",
-                    "road_class_legend_enabled",
-                    "route_col",
-                    "segment_id_col",
-                    "signals_clean",
-                    "signals_clean_all",
-                    "dropped_signal_ids",
-                    "applied_dropped_signal_ids",
-                    "signals_with_corridor",
-                    "signals_for_corridors",
-                    "corridor_signal_summary",
-                    "corridors",
-                    "final_corridors",
-                    "dropped_corridor_ids",
-                    "applied_dropped_corridor_ids",
-                    "corridor_shp_bytes",
-                    "crashes",
-                    "spatial_units",
-                    "spatial_units_density_map",
-                    "assigned_crashes",
-                    "kabco_result",
-                    "analysis_type",
-                    "classified",
-                    "unit_col",
-                    "section7_results",
-                    "section7_original_density",
-                    "section7_crashes_for_map",
-                    "section7_route_col_s7"
-                ]:
-                    st.session_state.pop(
-                        k,
-                        None
-                    )
-
-                st.rerun()
 
         st.write(
             f"Analysis roads: {len(analysis_roads)}"
